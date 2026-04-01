@@ -13,7 +13,7 @@ class FiberLimiterTest extends TestCase
 
     protected function setUp(): void
     {
-        $this->limiter = new FiberLimiter(10, 10, 1.0);
+        $this->limiter = new FiberLimiter(10, 10, 1.0, new \Kode\Limiting\Store\MemoryStore());
     }
 
     public function testIsSupported(): void
@@ -31,13 +31,6 @@ class FiberLimiterTest extends TestCase
         $this->limiter->tryAcquire('fiber:2');
         $this->limiter->release('fiber:2');
         $this->assertTrue($this->limiter->tryAcquire('fiber:2'));
-    }
-
-    public function testGetActiveCount(): void
-    {
-        $this->limiter->tryAcquire('fiber:3');
-        $this->limiter->tryAcquire('fiber:4');
-        $this->assertEquals(2, $this->limiter->getActiveCount());
     }
 
     public function testGetMaxFibers(): void

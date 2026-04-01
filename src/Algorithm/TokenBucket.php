@@ -4,43 +4,45 @@ declare(strict_types=1);
 
 namespace Kode\Limiting\Algorithm;
 
+use Kode\Limiting\DTO\LimiterConfig;
+use Kode\Limiting\DTO\LimiterResult;
 use Kode\Limiting\Store\StoreInterface;
 
 /**
  * 令牌桶限流算法
  *
  * 支持突发流量，按固定速率补充令牌
+ * 使用 PHP 8.2 readonly 属性优化性能
  */
 class TokenBucket implements RateLimiterInterface
 {
-    private StoreInterface $store;
-    private int $capacity;
-    private float $refillRate;
-    private int $ttl;
+    private readonly string $bucketPrefix;
 
     public function __construct(
-        StoreInterface $store,
-        int $capacity,
-        float $refillRate,
-        int $ttl = 3600
+        private readonly StoreInterface $store,
+        private readonly int $capacity,
+        private readonly float $refillRate,
+        private readonly int $ttl = 3600,
+        private readonly string $prefix = 'bucket:'
     ) {
-        $this->store = $store;
-        $this->capacity = $capacity;
-        $this->refillRate = $refillRate;
-        $this->ttl = $ttl;
+        $this->bucketPrefix = $this->prefix . 'bucket:';
     }
 
-    /**
-     * 检查是否允许请求
-     *
-     * @param string $key 限流键
-     * @param int $tokens 消耗令牌数
-     * @return bool
-     */
+    public static function fromConfig(StoreInterface $store, LimiterConfig $config): self
+    {
+        return new self(
+            $store,
+            $config->capacity,
+            $config->refillRate,
+            $config->ttl,
+            $config->prefix
+        );
+    }
+
     public function allow(string $key, int $tokens = 1): bool
     {
         $now = microtime(true);
-        $bucketKey = 'bucket:' . $key;
+        $bucketKey = $this->bucketPrefix . $key;
 
         $data = $this->store->get($bucketKey);
 
@@ -69,13 +71,21 @@ class TokenBucket implements RateLimiterInterface
         return false;
     }
 
-    /**
-     * 获取剩余令牌数
-     */
+    public function check(string $key, int $tokens = 1): LimiterResult
+    {
+        $remaining = $this->getRemaining($key);
+
+        if ($remaining >= $tokens) {
+            return LimiterResult::allowed($remaining - $tokens);
+        }
+
+        return LimiterResult::denied($this->getWaitTime($key));
+    }
+
     public function getRemaining(string $key): float
     {
         $now = microtime(true);
-        $bucketKey = 'bucket:' . $key;
+        $bucketKey = $this->bucketPrefix . $key;
 
         $data = $this->store->get($bucketKey);
 
@@ -90,9 +100,6 @@ class TokenBucket implements RateLimiterInterface
         return max(0, min($this->capacity, $bucket['tokens'] + $refillAmount));
     }
 
-    /**
-     * 获取等待时间（秒）
-     */
     public function getWaitTime(string $key): float
     {
         $remaining = $this->getRemaining($key);
@@ -102,12 +109,9 @@ class TokenBucket implements RateLimiterInterface
         return (1.0 - $remaining) / $this->refillRate;
     }
 
-    /**
-     * 重置限流器
-     */
     public function reset(string $key): void
     {
-        $this->store->delete('bucket:' . $key);
+        $this->store->delete($this->bucketPrefix . $key);
     }
 
     public function getCapacity(): int
@@ -118,5 +122,10 @@ class TokenBucket implements RateLimiterInterface
     public function getRefillRate(): float
     {
         return $this->refillRate;
+    }
+
+    public function getTtl(): int
+    {
+        return $this->ttl;
     }
 }

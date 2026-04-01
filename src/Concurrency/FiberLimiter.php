@@ -11,27 +11,28 @@ use Kode\Limiting\Store\MemoryStore;
  * Fiber 协程限流器
  *
  * 控制同时运行的 Fiber 数量
+ * 使用 PHP 8.2 readonly 属性优化性能
  */
 class FiberLimiter
 {
-    private TokenBucket $bucket;
-    private int $maxFibers;
-    private array $activeFibers = [];
+    private readonly TokenBucket $bucket;
     private static bool $fiberSupported;
 
     public function __construct(
-        int $maxFibers,
-        int $capacity,
-        float $refillRate,
-        ?MemoryStore $store = null
+        private readonly int $maxFibers,
+        private readonly int $capacity,
+        private readonly float $refillRate,
+        private readonly MemoryStore $store,
+        private readonly string $prefix = 'fiber:'
     ) {
-        $this->maxFibers = $maxFibers;
         $this->bucket = new TokenBucket(
-            $store ?? new MemoryStore(),
-            $capacity,
-            $refillRate
+            $this->store,
+            $this->capacity,
+            $this->refillRate,
+            3600,
+            $this->prefix
         );
-        self::$fiberSupported = class_exists(\Fiber::class);
+        self::$fiberSupported ??= class_exists(\Fiber::class);
     }
 
     public static function isSupported(): bool
@@ -39,22 +40,12 @@ class FiberLimiter
         return self::$fiberSupported;
     }
 
-    /**
-     * 尝试获取 Fiber 许可
-     */
     public function tryAcquire(string $fiberId): bool
     {
-        if (!$this->bucket->allow('fiber:' . $fiberId, 1)) {
-            return false;
-        }
-
-        $this->activeFibers[$fiberId] = true;
-        return true;
+        $key = $this->prefix . 'fiber:' . $fiberId;
+        return $this->bucket->allow($key, 1);
     }
 
-    /**
-     * 阻塞等待获取许可
-     */
     public function acquire(string $fiberId, float $timeout = 30.0): bool
     {
         $start = microtime(true);
@@ -74,10 +65,7 @@ class FiberLimiter
         return true;
     }
 
-    /**
-     * 创建并启动 Fiber
-     */
-    public function create(string $fiberId, callable $callback): ?\Fiber
+    public function start(string $fiberId, callable $callback): ?\Fiber
     {
         if (!self::$fiberSupported) {
             return null;
@@ -99,26 +87,16 @@ class FiberLimiter
         return $fiber;
     }
 
-    /**
-     * 释放 Fiber
-     */
     public function release(string $fiberId): void
     {
-        unset($this->activeFibers[$fiberId]);
-        $this->bucket->reset('fiber:' . $fiberId);
+        $this->bucket->reset($this->prefix . 'fiber:' . $fiberId);
     }
 
-    /**
-     * 获取当前活跃 Fiber 数
-     */
     public function getActiveCount(): int
     {
-        return count($this->activeFibers);
+        return (int) ($this->store->get($this->prefix . 'active') ?? 0);
     }
 
-    /**
-     * 获取最大 Fiber 数
-     */
     public function getMaxFibers(): int
     {
         return $this->maxFibers;

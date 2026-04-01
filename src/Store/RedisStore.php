@@ -7,28 +7,20 @@ namespace Kode\Limiting\Store;
 /**
  * Redis 存储实现（分布式使用）
  *
- * 支持连接池、Lua 脚本原子操作、Sentinel/Cluster 模式
+ * 支持单机、Sentinel、Cluster 模式
+ * 使用 PHP 8.2 readonly 属性优化性能
  */
 class RedisStore implements StoreInterface
 {
-    private \Redis|\RedisCluster $redis;
-    private string $prefix;
-    private array $config;
+    private readonly string $prefix;
 
-    public function __construct(\Redis|\RedisCluster $redis, string $prefix = 'kode:limiting:', array $config = [])
-    {
-        $this->redis = $redis;
+    public function __construct(
+        private readonly \Redis|\RedisCluster $redis,
+        string $prefix = 'kode:limiting:'
+    ) {
         $this->prefix = $prefix;
-        $this->config = array_merge([
-            'pool_size' => 10,
-            'timeout' => 0.0,
-            'persistent' => false,
-        ], $config);
     }
 
-    /**
-     * 创建单机 Redis 连接
-     */
     public static function create(
         string $host = '127.0.0.1',
         int $port = 6379,
@@ -48,9 +40,6 @@ class RedisStore implements StoreInterface
         return new self($redis, $prefix);
     }
 
-    /**
-     * 创建 Redis Sentinel 连接（高可用）
-     */
     public static function createSentinel(
         array $sentinels,
         string $masterName,
@@ -89,9 +78,6 @@ class RedisStore implements StoreInterface
         throw new \RuntimeException('无法连接到 Redis Sentinel 主节点');
     }
 
-    /**
-     * 创建 Redis Cluster 连接（分片）
-     */
     public static function createCluster(
         array $nodes,
         ?string $password = null,
@@ -144,30 +130,22 @@ class RedisStore implements StoreInterface
         return $this->redis->ttl($this->key($key));
     }
 
-    /**
-     * 执行 Lua 脚本（原子操作）
-     */
     public function eval(string $script, array $keys = [], int $numKeys = 0): mixed
     {
         return $this->redis->eval($script, $keys, $numKeys);
     }
 
-    /**
-     * 获取 Redis 客户端实例
-     */
     public function getClient(): \Redis|\RedisCluster
     {
         return $this->redis;
     }
 
-    /**
-     * 健康检查
-     */
     public function isHealthy(): bool
     {
         try {
-            return $this->redis->ping() === '+PONG' || $this->redis->ping() === true;
-        } catch (\Exception $e) {
+            $pong = $this->redis->ping();
+            return $pong === true || $pong === '+PONG' || $pong === 'PONG';
+        } catch (\Throwable $e) {
             return false;
         }
     }

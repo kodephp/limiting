@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 namespace Kode\Limiting\Distributed;
 
-use Kode\Limiting\Algorithm\TokenBucket;
+use Kode\Limiting\DTO\LimiterConfig;
+use Kode\Limiting\DTO\LimiterResult;
 use Kode\Limiting\Store\RedisStore;
 
 /**
@@ -12,15 +13,10 @@ use Kode\Limiting\Store\RedisStore;
  *
  * 支持单机、Sentinel、Cluster 模式
  * 使用 Lua 脚本保证原子性
+ * 使用 PHP 8.2 readonly 属性优化性能
  */
 class DistributedLimiter
 {
-    private RedisStore $store;
-    private int $capacity;
-    private float $refillRate;
-    private int $ttl;
-    private string $prefix;
-
     private const LUA_ALLOW = <<<'LUA'
 local key = KEYS[1]
 local capacity = tonumber(ARGV[1])
@@ -51,23 +47,23 @@ redis.call('SET', key, cjson.encode(data), 'EX', ttl)
 return 0
 LUA;
 
+    private readonly string $bucketPrefix;
+
     public function __construct(
-        RedisStore $store,
-        int $capacity,
-        float $refillRate,
-        int $ttl = 3600,
-        string $prefix = 'limiter:'
+        private readonly RedisStore $store,
+        private readonly int $capacity,
+        private readonly float $refillRate,
+        private readonly int $ttl = 3600,
+        private readonly string $prefix = 'limiter:'
     ) {
-        $this->store = $store;
-        $this->capacity = $capacity;
-        $this->refillRate = $refillRate;
-        $this->ttl = $ttl;
-        $this->prefix = $prefix;
+        $this->bucketPrefix = $this->prefix . 'bucket:';
     }
 
-    /**
-     * 创建分布式限流器（单机模式）
-     */
+    public static function fromConfig(RedisStore $store, LimiterConfig $config): self
+    {
+        return new self($store, $config->capacity, $config->refillRate, $config->ttl, $config->prefix);
+    }
+
     public static function create(
         string $host = '127.0.0.1',
         int $port = 6379,
@@ -84,9 +80,6 @@ LUA;
         );
     }
 
-    /**
-     * 创建分布式限流器（Sentinel 高可用模式）
-     */
     public static function createSentinel(
         array $sentinels,
         string $masterName,
@@ -103,9 +96,6 @@ LUA;
         );
     }
 
-    /**
-     * 创建分布式限流器（Cluster 模式）
-     */
     public static function createCluster(
         array $nodes,
         int $capacity = 100,
@@ -120,12 +110,9 @@ LUA;
         );
     }
 
-    /**
-     * 检查是否允许请求（原子操作）
-     */
     public function allow(string $key, int $tokens = 1): bool
     {
-        $bucketKey = $this->prefix . 'bucket:' . $key;
+        $bucketKey = $this->bucketPrefix . $key;
 
         $result = $this->store->eval(
             self::LUA_ALLOW,
@@ -141,20 +128,25 @@ LUA;
         return $result === 1 || $result === true;
     }
 
-    /**
-     * 尝试获取（别名方法，兼容本地限流器）
-     */
     public function tryAcquire(string $key, int $tokens = 1): bool
     {
         return $this->allow($key, $tokens);
     }
 
-    /**
-     * 获取剩余令牌数
-     */
+    public function check(string $key, int $tokens = 1): LimiterResult
+    {
+        $remaining = $this->getRemaining($key);
+
+        if ($remaining >= $tokens) {
+            return LimiterResult::allowed($remaining - $tokens);
+        }
+
+        return LimiterResult::denied($this->getWaitTime($key));
+    }
+
     public function getRemaining(string $key): float
     {
-        $bucketKey = $this->prefix . 'bucket:' . $key;
+        $bucketKey = $this->bucketPrefix . $key;
         $now = microtime(true);
 
         $data = $this->store->get($bucketKey);
@@ -170,9 +162,6 @@ LUA;
         return max(0, min($this->capacity, $bucket['tokens'] + $refillAmount));
     }
 
-    /**
-     * 获取等待时间
-     */
     public function getWaitTime(string $key): float
     {
         $remaining = $this->getRemaining($key);
@@ -182,21 +171,11 @@ LUA;
         return (1.0 - $remaining) / $this->refillRate;
     }
 
-    /**
-     * 重置限流器
-     */
     public function reset(string $key): void
     {
-        $this->store->delete($this->prefix . 'bucket:' . $key);
+        $this->store->delete($this->bucketPrefix . $key);
     }
 
-    /**
-     * 批量限流检查
-     *
-     * @param array $keys 键数组
-     * @param int $tokens 每个键消耗的令牌数
-     * @return array [成功键名数组, 失败键名数组]
-     */
     public function allowBatch(array $keys, int $tokens = 1): array
     {
         $success = [];
@@ -213,27 +192,23 @@ LUA;
         return [$success, $failed];
     }
 
-    /**
-     * 获取存储实例
-     */
     public function getStore(): RedisStore
     {
         return $this->store;
     }
 
-    /**
-     * 获取容量
-     */
     public function getCapacity(): int
     {
         return $this->capacity;
     }
 
-    /**
-     * 获取补充速率
-     */
     public function getRefillRate(): float
     {
         return $this->refillRate;
+    }
+
+    public function getTtl(): int
+    {
+        return $this->ttl;
     }
 }

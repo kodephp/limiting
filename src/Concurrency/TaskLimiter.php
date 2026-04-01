@@ -11,51 +11,43 @@ use Kode\Limiting\Store\MemoryStore;
  * 并发任务限流器
  *
  * 控制同时执行的最大任务数
+ * 使用 PHP 8.2 readonly 属性优化性能
  */
 class TaskLimiter
 {
-    private TokenBucket $bucket;
-    private int $maxConcurrency;
-    private array $activeTasks = [];
+    private readonly TokenBucket $bucket;
 
     public function __construct(
-        int $maxConcurrency,
-        int $capacity,
-        float $refillRate,
-        ?MemoryStore $store = null
+        private readonly int $maxConcurrency,
+        private readonly int $capacity,
+        private readonly float $refillRate,
+        private readonly MemoryStore $store,
+        private readonly string $prefix = 'task:'
     ) {
-        $this->maxConcurrency = $maxConcurrency;
         $this->bucket = new TokenBucket(
-            $store ?? new MemoryStore(),
-            $capacity,
-            $refillRate
+            $this->store,
+            $this->capacity,
+            $this->refillRate,
+            3600,
+            $this->prefix
         );
     }
 
-    /**
-     * 尝试获取任务执行许可
-     */
-    public function tryAcquire(string $taskId): bool
-    {
-        if (count($this->activeTasks) >= $this->maxConcurrency) {
-            return false;
-        }
-
-        if (!$this->bucket->allow('task:' . $taskId, 1)) {
-            return false;
-        }
-
-        $this->activeTasks[$taskId] = true;
-        return true;
+    public static function create(
+        int $maxConcurrency,
+        int $capacity,
+        float $refillRate = 1.0,
+        ?MemoryStore $store = null
+    ): self {
+        return new self($maxConcurrency, $capacity, $refillRate, $store ?? new MemoryStore());
     }
 
-    /**
-     * 阻塞等待获取许可
-     *
-     * @param string $taskId 任务ID
-     * @param float $timeout 超时时间（秒）
-     * @return bool
-     */
+    public function tryAcquire(string $taskId): bool
+    {
+        $key = $this->prefix . 'task:' . $taskId;
+        return $this->bucket->allow($key, 1);
+    }
+
     public function acquire(string $taskId, float $timeout = 30.0): bool
     {
         $start = microtime(true);
@@ -70,13 +62,6 @@ class TaskLimiter
         return true;
     }
 
-    /**
-     * 执行任务（自动获取和释放）
-     *
-     * @param string $taskId 任务ID
-     * @param callable $callback 任务回调
-     * @return mixed
-     */
     public function run(string $taskId, callable $callback): mixed
     {
         if (!$this->acquire($taskId)) {
@@ -90,26 +75,16 @@ class TaskLimiter
         }
     }
 
-    /**
-     * 释放任务
-     */
     public function release(string $taskId): void
     {
-        unset($this->activeTasks[$taskId]);
-        $this->bucket->reset('task:' . $taskId);
+        $this->bucket->reset($this->prefix . 'task:' . $taskId);
     }
 
-    /**
-     * 获取当前活跃任务数
-     */
     public function getActiveCount(): int
     {
-        return count($this->activeTasks);
+        return (int) ($this->store->get($this->prefix . 'active') ?? 0);
     }
 
-    /**
-     * 获取最大并发数
-     */
     public function getMaxConcurrency(): int
     {
         return $this->maxConcurrency;

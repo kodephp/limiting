@@ -8,59 +8,54 @@ use Kode\Limiting\Algorithm\TokenBucket;
 use Kode\Limiting\Store\MemoryStore;
 
 /**
- * 进程限流器
+ * 进程限流器（单例模式）
  *
  * 控制同时运行的最大进程数
+ * 使用 PHP 8.2 readonly 属性优化性能
  */
 class ProcessLimiter
 {
-    private TokenBucket $bucket;
-    private int $maxProcesses;
-    private array $activeProcesses = [];
+    private static ?self $instance = null;
+    private readonly TokenBucket $bucket;
 
     public function __construct(
-        int $maxProcesses,
-        int $capacity,
-        float $refillRate,
-        ?MemoryStore $store = null
+        private readonly int $maxProcesses,
+        private readonly int $capacity,
+        private readonly float $refillRate,
+        private readonly MemoryStore $store,
+        private readonly string $prefix = 'process:'
     ) {
-        $this->maxProcesses = $maxProcesses;
         $this->bucket = new TokenBucket(
-            $store ?? new MemoryStore(),
-            $capacity,
-            $refillRate
+            $this->store,
+            $this->capacity,
+            $this->refillRate,
+            3600,
+            $this->prefix
         );
     }
 
-    /**
-     * 获取单例实例
-     */
     public static function getInstance(
         int $maxProcesses = 10,
         int $capacity = 10,
         float $refillRate = 1.0
     ): self {
-        static $instance = null;
-        $instance ??= new self($maxProcesses, $capacity, $refillRate);
-        return $instance;
-    }
+        $instanceKey = "{$maxProcesses}:{$capacity}:{$refillRate}";
 
-    /**
-     * 尝试获取进程许可
-     */
-    public function tryAcquire(string $processId): bool
-    {
-        if (!$this->bucket->allow('process:' . $processId, 1)) {
-            return false;
+        if (!isset(self::$instances[$instanceKey])) {
+            self::$instances[$instanceKey] = new self($maxProcesses, $capacity, $refillRate, new MemoryStore());
         }
 
-        $this->activeProcesses[$processId] = true;
-        return true;
+        return self::$instances[$instanceKey];
     }
 
-    /**
-     * 阻塞等待获取许可
-     */
+    private static array $instances = [];
+
+    public function tryAcquire(string $processId): bool
+    {
+        $key = $this->prefix . 'process:' . $processId;
+        return $this->bucket->allow($key, 1);
+    }
+
     public function acquire(string $processId, float $timeout = 30.0): bool
     {
         $start = microtime(true);
@@ -75,26 +70,16 @@ class ProcessLimiter
         return true;
     }
 
-    /**
-     * 释放进程
-     */
     public function release(string $processId): void
     {
-        unset($this->activeProcesses[$processId]);
-        $this->bucket->reset('process:' . $processId);
+        $this->bucket->reset($this->prefix . 'process:' . $processId);
     }
 
-    /**
-     * 获取当前活跃进程数
-     */
     public function getActiveCount(): int
     {
-        return count($this->activeProcesses);
+        return (int) ($this->store->get($this->prefix . 'active') ?? 0);
     }
 
-    /**
-     * 获取最大进程数
-     */
     public function getMaxProcesses(): int
     {
         return $this->maxProcesses;

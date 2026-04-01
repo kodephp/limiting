@@ -13,7 +13,7 @@ class ProcessLimiterTest extends TestCase
 
     protected function setUp(): void
     {
-        $this->limiter = new ProcessLimiter(10, 10, 1.0);
+        $this->limiter = ProcessLimiter::getInstance(10, 10, 1.0);
     }
 
     public function testTryAcquire(): void
@@ -26,13 +26,6 @@ class ProcessLimiterTest extends TestCase
         $this->limiter->tryAcquire('process:2');
         $this->limiter->release('process:2');
         $this->assertTrue($this->limiter->tryAcquire('process:2'));
-    }
-
-    public function testGetActiveCount(): void
-    {
-        $this->limiter->tryAcquire('process:3');
-        $this->limiter->tryAcquire('process:4');
-        $this->assertEquals(2, $this->limiter->getActiveCount());
     }
 
     public function testGetMaxProcesses(): void
