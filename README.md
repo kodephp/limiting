@@ -507,31 +507,3 @@ kode/limiting/
 ## 许可证
 
 Apache License 2.0 - 参见 [LICENSE](LICENSE) 文件
-
-## 版本历史
-
-### v1.2.0
-
-- 使用 PHP 8.2 readonly 属性优化性能
-- 添加 Enums 枚举类型（LimiterType、StoreType、RedisMode）
-- 添加 DTO 不可变对象（LimiterConfig、LimiterResult）
-- 优化 TokenBucket 和 SlidingWindow 实现
-- 优化 RedisStore 和 MemoryStore
-- 优化并发控制器
-- 更新 PHP 版本要求为 8.2+
-
-### v1.1.0
-
-- 新增 Redis Sentinel 高可用支持
-- 新增 Redis Cluster 分片支持
-- 新增分布式并发控制器（Task/Process/Fiber）
-- 新增 Lua 脚本原子操作
-- 新增 `RateLimiterInterface` 接口
-
-### v1.0.0
-
-- 初始版本
-- 令牌桶算法
-- 滑动窗口算法
-- 本地/分布式存储
-- 并发控制
