@@ -14,11 +14,24 @@ class PdoStore implements StoreInterface
 {
     private readonly string $prefix;
 
+    /**
+     * 构造函数
+     *
+     * @param \PDO $pdo PDO 客户端实例
+     * @param string $table 表名
+     * @param string $prefix 键前缀
+     * @throws \RuntimeException 当 PDO 扩展未安装时
+     */
     public function __construct(
         private readonly \PDO $pdo,
         private readonly string $table = 'limiting',
         string $prefix = 'kode:limiting:'
     ) {
+        if (!extension_loaded('pdo')) {
+            throw new \RuntimeException(
+                'PDO 扩展未安装，请先启用 PDO 扩展或参见 https://www.php.net/manual/zh/pdo.installation.php'
+            );
+        }
         $this->prefix = $prefix;
         $this->initTable();
     }
@@ -33,6 +46,7 @@ class PdoStore implements StoreInterface
      * @param string $password 密码
      * @param string $table 表名
      * @return self
+     * @throws \RuntimeException 当 PDO 扩展未安装时
      */
     public static function createMysql(
         string $host = '127.0.0.1',
@@ -42,6 +56,12 @@ class PdoStore implements StoreInterface
         string $password = '',
         string $table = 'limiting'
     ): self {
+        if (!extension_loaded('pdo_mysql')) {
+            throw new \RuntimeException(
+                'PDO MySQL 扩展未安装，请先执行：pecl install pdo_mysql 或参见 https://www.php.net/manual/zh/ref.pdo-mysql.php'
+            );
+        }
+
         $dsn = "mysql:host={$host};port={$port};dbname={$database};charset=utf8mb4";
         $pdo = new \PDO($dsn, $username, $password, [
             \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
@@ -57,11 +77,18 @@ class PdoStore implements StoreInterface
      * @param string $path 数据库文件路径
      * @param string $table 表名
      * @return self
+     * @throws \RuntimeException 当 PDO 扩展未安装时
      */
     public static function createSqlite(
         string $path = ':memory:',
         string $table = 'limiting'
     ): self {
+        if (!extension_loaded('pdo_sqlite')) {
+            throw new \RuntimeException(
+                'PDO SQLite 扩展未安装，请先启用 pdo_sqlite 扩展或参见 https://www.php.net/manual/zh/ref.pdo-sqlite.php'
+            );
+        }
+
         $dsn = "sqlite:{$path}";
         $pdo = new \PDO($dsn, null, null, [
             \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
@@ -80,6 +107,7 @@ class PdoStore implements StoreInterface
      * @param string $password 密码
      * @param string $table 表名
      * @return self
+     * @throws \RuntimeException 当 PDO 扩展未安装时
      */
     public static function createPostgres(
         string $host = '127.0.0.1',
@@ -89,6 +117,12 @@ class PdoStore implements StoreInterface
         string $password = '',
         string $table = 'limiting'
     ): self {
+        if (!extension_loaded('pdo_pgsql')) {
+            throw new \RuntimeException(
+                'PDO PostgreSQL 扩展未安装，请先执行：pecl install pdo_pgsql 或参见 https://www.php.net/manual/zh/ref.pdo-pgsql.php'
+            );
+        }
+
         $dsn = "pgsql:host={$host};port={$port};dbname={$database}";
         $pdo = new \PDO($dsn, $username, $password, [
             \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
@@ -139,9 +173,6 @@ class PdoStore implements StoreInterface
 
     /**
      * 获取值
-     *
-     * @param string $key 键名
-     * @return string|null
      */
     public function get(string $key): ?string
     {
@@ -165,10 +196,6 @@ class PdoStore implements StoreInterface
 
     /**
      * 设置值
-     *
-     * @param string $key 键名
-     * @param string $value 值
-     * @param int $ttl 过期时间（秒）
      */
     public function set(string $key, string $value, int $ttl = 0): void
     {
@@ -182,8 +209,6 @@ class PdoStore implements StoreInterface
 
     /**
      * 删除键
-     *
-     * @param string $key 键名
      */
     public function delete(string $key): void
     {
@@ -195,10 +220,6 @@ class PdoStore implements StoreInterface
 
     /**
      * 原子递增
-     *
-     * @param string $key 键名
-     * @param int $step 步长
-     * @return int
      */
     public function incr(string $key, int $step = 1): int
     {
@@ -210,9 +231,6 @@ class PdoStore implements StoreInterface
 
     /**
      * 获取键的剩余 TTL
-     *
-     * @param string $key 键名
-     * @return int
      */
     public function ttl(string $key): int
     {
@@ -237,8 +255,6 @@ class PdoStore implements StoreInterface
 
     /**
      * 获取 PDO 客户端实例
-     *
-     * @return \PDO
      */
     public function getClient(): \PDO
     {
@@ -247,8 +263,6 @@ class PdoStore implements StoreInterface
 
     /**
      * 健康检查
-     *
-     * @return bool
      */
     public function isHealthy(): bool
     {

@@ -14,10 +14,22 @@ class MemcachedStore implements StoreInterface
 {
     private readonly string $prefix;
 
+    /**
+     * 构造函数
+     *
+     * @param \Memcached $memcached Memcached 客户端实例
+     * @param string $prefix 键前缀
+     * @throws \RuntimeException 当 Memcached 扩展未安装时
+     */
     public function __construct(
         private readonly \Memcached $memcached,
         string $prefix = 'kode:limiting:'
     ) {
+        if (!extension_loaded('memcached')) {
+            throw new \RuntimeException(
+                'Memcached 扩展未安装，请先执行：pecl install memcached 或参见 https://www.php.net/manual/zh/book.memcached.php'
+            );
+        }
         $this->prefix = $prefix;
     }
 
@@ -28,12 +40,19 @@ class MemcachedStore implements StoreInterface
      * @param int $port Memcached 服务器端口
      * @param string $prefix 键前缀
      * @return self
+     * @throws \RuntimeException 当 Memcached 扩展未安装时
      */
     public static function create(
         string $host = '127.0.0.1',
         int $port = 11211,
         string $prefix = 'kode:limiting:'
     ): self {
+        if (!extension_loaded('memcached')) {
+            throw new \RuntimeException(
+                'Memcached 扩展未安装，请先执行：pecl install memcached 或参见 https://www.php.net/manual/zh/book.memcached.php'
+            );
+        }
+
         $memcached = new \Memcached();
         $memcached->addServer($host, $port);
 
@@ -70,9 +89,6 @@ class MemcachedStore implements StoreInterface
 
     /**
      * 获取值
-     *
-     * @param string $key 键名
-     * @return string|null
      */
     public function get(string $key): ?string
     {
@@ -87,10 +103,6 @@ class MemcachedStore implements StoreInterface
 
     /**
      * 设置值
-     *
-     * @param string $key 键名
-     * @param string $value 值
-     * @param int $ttl 过期时间（秒）
      */
     public function set(string $key, string $value, int $ttl = 0): void
     {
@@ -99,8 +111,6 @@ class MemcachedStore implements StoreInterface
 
     /**
      * 删除键
-     *
-     * @param string $key 键名
      */
     public function delete(string $key): void
     {
@@ -109,10 +119,6 @@ class MemcachedStore implements StoreInterface
 
     /**
      * 原子递增
-     *
-     * @param string $key 键名
-     * @param int $step 步长
-     * @return int
      */
     public function incr(string $key, int $step = 1): int
     {
@@ -128,9 +134,6 @@ class MemcachedStore implements StoreInterface
 
     /**
      * 获取键的剩余 TTL
-     *
-     * @param string $key 键名
-     * @return int
      */
     public function ttl(string $key): int
     {
@@ -146,8 +149,6 @@ class MemcachedStore implements StoreInterface
 
     /**
      * 获取 Memcached 客户端实例
-     *
-     * @return \Memcached
      */
     public function getClient(): \Memcached
     {
@@ -156,8 +157,6 @@ class MemcachedStore implements StoreInterface
 
     /**
      * 健康检查
-     *
-     * @return bool
      */
     public function isHealthy(): bool
     {
