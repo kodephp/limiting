@@ -2,7 +2,7 @@
     "name": "kode/limiting",
     "description": "PHP 限流器，支持令牌桶、滑动窗口算法，可用于本地和分布式限流",
     "type": "library",
-    "version": "1.6.0",
+    "version": "1.7.0",
     "license": "Apache-2.0",
     "keywords": [
         "limiting",
