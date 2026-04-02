@@ -11,6 +11,10 @@ use Kode\Limiting\Store\StoreInterface;
  *
  * 特点：固定速率输出，适合流量整形
  * 水（请求）以任意速率进入桶，但以固定速率离开
+ *
+ * 与令牌桶的区别：
+ * - 令牌桶：允许突发流量，桶满则拒绝
+ * - 漏桶：请求匀速处理，超速则等待
  */
 class LeakyBucket implements RateLimiterInterface
 {
@@ -64,6 +68,11 @@ class LeakyBucket implements RateLimiterInterface
 
     /**
      * 漏水处理
+     *
+     * 根据时间流逝，计算漏出的水量
+     *
+     * @param array $bucket 桶数据
+     * @param float $now 当前时间戳
      */
     private function leak(array &$bucket, float $now): void
     {
@@ -74,6 +83,12 @@ class LeakyBucket implements RateLimiterInterface
         $bucket['last_leak'] = $now;
     }
 
+    /**
+     * 获取剩余容量
+     *
+     * @param string $key 限流键
+     * @return float
+     */
     public function getRemaining(string $key): float
     {
         $now = microtime(true);
@@ -90,6 +105,12 @@ class LeakyBucket implements RateLimiterInterface
         return max(0, $this->capacity - $bucket['water']);
     }
 
+    /**
+     * 获取等待时间
+     *
+     * @param string $key 限流键
+     * @return float
+     */
     public function getWaitTime(string $key): float
     {
         $remaining = $this->getRemaining($key);
@@ -101,16 +122,31 @@ class LeakyBucket implements RateLimiterInterface
         return (1.0 - $remaining) / $this->leakRate;
     }
 
+    /**
+     * 重置限流器
+     *
+     * @param string $key 限流键
+     */
     public function reset(string $key): void
     {
         $this->store->delete($this->bucketPrefix . $key);
     }
 
+    /**
+     * 获取桶容量
+     *
+     * @return int
+     */
     public function getCapacity(): int
     {
         return $this->capacity;
     }
 
+    /**
+     * 获取漏水速率
+     *
+     * @return float
+     */
     public function getLeakRate(): float
     {
         return $this->leakRate;
