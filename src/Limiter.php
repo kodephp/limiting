@@ -4,117 +4,188 @@ declare(strict_types=1);
 
 namespace Kode\Limiting;
 
+use Kode\Limiting\Algorithm\CompositeLimiter;
 use Kode\Limiting\Algorithm\RateLimiterInterface;
-use Kode\Limiting\Algorithm\SlidingWindow;
-use Kode\Limiting\Algorithm\TokenBucket;
 use Kode\Limiting\Concurrency\FiberLimiter;
 use Kode\Limiting\Concurrency\ProcessLimiter;
+use Kode\Limiting\Concurrency\Semaphore;
 use Kode\Limiting\Concurrency\TaskLimiter;
 use Kode\Limiting\DTO\LimiterConfig;
+use Kode\Limiting\DTO\LimiterResult;
 use Kode\Limiting\Enum\LimiterType;
 use Kode\Limiting\Enum\RedisMode;
 use Kode\Limiting\Enum\StoreType;
+use Kode\Limiting\Exception\InvalidConfigurationException;
+use Kode\Limiting\Exception\RateLimitExceededException;
 use Kode\Limiting\Middleware\LimiterMiddleware;
-use Kode\Limiting\Store\MemoryStore;
+use Kode\Limiting\Store\ApcuStore;
 use Kode\Limiting\Store\MemcachedStore;
+use Kode\Limiting\Store\MemoryStore;
 use Kode\Limiting\Store\PdoStore;
 use Kode\Limiting\Store\RedisStore;
 use Kode\Limiting\Store\StoreInterface;
 
 /**
- * 限流器统一入口类
+ * 限流器统一入口
  *
- * 提供简洁统一的 API 创建各种限流器实例
- * 支持链式调用和配置复用
+ * v2.0 改进：
+ *  - 修复 leakyBucket() / counter() 名不副实的问题（此前一律返回令牌桶）；
+ *  - 补齐 memcached() / pdo() 的 StoreType 映射；
+ *  - 新增流式配置（withXxx）、组合限流、consumeOrFail 等能力；
+ *  - 实现 RateLimiterInterface，可与任意算法互换使用。
  *
  * @example
  * ```php
  * // 快速开始
- * $limiter = Limiter::tokenBucket();
- * $limiter->allow('api:user:123');
+ * Limiter::tokenBucket(100, 10.0)->allow('api:user:123');
  *
- * // 完整配置
- * $limiter = Limiter::create(LimiterType::TOKEN_BUCKET, [
- *     'store' => StoreType::REDIS,
- *     'capacity' => 100,
- *     'refillRate' => 10,
- * ]);
+ * // 流式配置
+ * $limiter = Limiter::of(LimiterType::SLIDING_WINDOW)
+ *     ->withCapacity(100)
+ *     ->withRate(60.0)
+ *     ->withStore(new MemoryStore());
+ *
+ * // 多规则组合：10 次/秒 且 100 次/分钟
+ * Limiter::composite([
+ *     'per_second' => Limiter::tokenBucket(10, 10.0)->build(),
+ *     'per_minute' => Limiter::counter(100, 60)->build(),
+ * ])->allow('api:user:123');
  * ```
  */
-class Limiter
+class Limiter implements RateLimiterInterface
 {
-    private StoreInterface $store;
-    private LimiterConfig $config;
+    private readonly StoreInterface $store;
+    private readonly LimiterConfig $config;
     private ?RateLimiterInterface $limiter = null;
 
+    /**
+     * @param StoreInterface|array<string, mixed>|null $store
+     * @param LimiterConfig|array<string, mixed>|null  $config
+     */
     public function __construct(
         private readonly StoreType $storeType = StoreType::MEMORY,
         private readonly LimiterType $limiterType = LimiterType::TOKEN_BUCKET,
         StoreInterface|array|null $store = null,
         LimiterConfig|array|null $config = null
     ) {
-        $this->store = $this->resolveStore($store);
-        $this->config = $this->resolveConfig($config);
+        $this->store = match (true) {
+            $store instanceof StoreInterface => $store,
+            is_array($store) => self::storeFromArray($store),
+            default => self::storeFromType($storeType),
+        };
+
+        $this->config = match (true) {
+            $config instanceof LimiterConfig => $config,
+            is_array($config) => LimiterConfig::fromArray($config),
+            default => new LimiterConfig(10, 1.0),
+        };
+    }
+
+    // ---------------------------------------------------------------------
+    // 算法工厂
+    // ---------------------------------------------------------------------
+
+    /**
+     * 通用工厂：按类型创建
+     *
+     * @param LimiterConfig|array<string, mixed>|null $config
+     */
+    public static function create(
+        LimiterType $type = LimiterType::TOKEN_BUCKET,
+        LimiterConfig|array|null $config = null,
+        StoreInterface|string|array|null $store = null
+    ): self {
+        $resolved = self::resolveStore($store);
+
+        return new self(self::detectStoreType($resolved), $type, $resolved, $config);
     }
 
     /**
-     * 创建令牌桶限流器（默认）
+     * 以默认配置开启流式构建
+     */
+    public static function of(LimiterType $type = LimiterType::TOKEN_BUCKET): self
+    {
+        return new self(StoreType::MEMORY, $type);
+    }
+
+    /**
+     * 令牌桶：允许突发，按固定速率补充
      */
     public static function tokenBucket(
         int $capacity = 10,
         float $refillRate = 1.0,
         StoreInterface|string|array|null $store = null
     ): self {
-        $config = new LimiterConfig($capacity, $refillRate);
-        $resolvedStore = self::resolveStoreInstance($store);
-
-        return new self(StoreType::MEMORY, LimiterType::TOKEN_BUCKET, $resolvedStore, $config);
+        return self::create(LimiterType::TOKEN_BUCKET, new LimiterConfig($capacity, $refillRate), $store);
     }
 
     /**
-     * 创建滑动窗口限流器
+     * 滑动窗口（精确日志）
      */
     public static function slidingWindow(
         int $capacity = 10,
         float $windowSize = 60.0,
         StoreInterface|string|array|null $store = null
     ): self {
-        $config = new LimiterConfig($capacity, $windowSize);
-        $resolvedStore = self::resolveStoreInstance($store);
-
-        return new self(StoreType::MEMORY, LimiterType::SLIDING_WINDOW, $resolvedStore, $config);
+        return self::create(LimiterType::SLIDING_WINDOW, new LimiterConfig($capacity, $windowSize), $store);
     }
 
     /**
-     * 创建漏桶限流器
+     * 滑动窗口计数器（加权近似，内存占用恒定）
+     */
+    public static function slidingWindowCounter(
+        int $capacity = 100,
+        int $windowSeconds = 60,
+        StoreInterface|string|array|null $store = null
+    ): self {
+        return self::create(
+            LimiterType::SLIDING_WINDOW_COUNTER,
+            new LimiterConfig($capacity, (float) $windowSeconds),
+            $store
+        );
+    }
+
+    /**
+     * 漏桶：固定速率漏出，抑制突发
      */
     public static function leakyBucket(
         int $capacity = 10,
         float $leakRate = 1.0,
         StoreInterface|string|array|null $store = null
     ): self {
-        $config = new LimiterConfig($capacity, $leakRate);
-        $resolvedStore = self::resolveStoreInstance($store);
-
-        return new self(StoreType::MEMORY, LimiterType::TOKEN_BUCKET, $resolvedStore, $config);
+        return self::create(LimiterType::LEAKY_BUCKET, new LimiterConfig($capacity, $leakRate), $store);
     }
 
     /**
-     * 创建计数器限流器
+     * 固定窗口计数器
      */
     public static function counter(
         int $maxRequests = 100,
         int $windowSeconds = 60,
         StoreInterface|string|array|null $store = null
     ): self {
-        $config = new LimiterConfig($maxRequests, (float) $windowSeconds);
-        $resolvedStore = self::resolveStoreInstance($store);
-
-        return new self(StoreType::MEMORY, LimiterType::TOKEN_BUCKET, $resolvedStore, $config);
+        return self::create(LimiterType::COUNTER, new LimiterConfig($maxRequests, (float) $windowSeconds), $store);
     }
 
     /**
-     * 使用 Redis 存储创建限流器
+     * 组合多条限流规则，全部通过才放行
+     *
+     * @param array<string, RateLimiterInterface>|list<RateLimiterInterface> $limiters
+     */
+    public static function composite(array $limiters): CompositeLimiter
+    {
+        return new CompositeLimiter($limiters);
+    }
+
+    // ---------------------------------------------------------------------
+    // 存储工厂
+    // ---------------------------------------------------------------------
+
+    /**
+     * 使用 Redis 存储
+     *
+     * @param list<string> $sentinels Sentinel 模式下的哨兵地址
+     * @param list<string> $clusterNodes Cluster 模式下的节点地址
      */
     public static function redis(
         LimiterType $limiterType = LimiterType::TOKEN_BUCKET,
@@ -124,26 +195,22 @@ class Limiter
         int $port = 6379,
         ?string $password = null,
         int $database = 0,
-        RedisMode $mode = RedisMode::STANDALONE
+        RedisMode $mode = RedisMode::STANDALONE,
+        array $sentinels = ['127.0.0.1:26379'],
+        string $masterName = 'mymaster',
+        array $clusterNodes = ['127.0.0.1:7000']
     ): self {
         $store = match ($mode) {
             RedisMode::STANDALONE => RedisStore::create($host, $port, 'kode:limiting:', $password, $database),
-            RedisMode::SENTINEL => RedisStore::createSentinel(
-                ['127.0.0.1:26379'],
-                'mymaster',
-                $password,
-                $database
-            ),
-            RedisMode::CLUSTER => RedisStore::createCluster(['127.0.0.1:7000']),
+            RedisMode::SENTINEL => RedisStore::createSentinel($sentinels, $masterName, $password, $database),
+            RedisMode::CLUSTER => RedisStore::createCluster($clusterNodes, $password),
         };
 
-        $config = new LimiterConfig($capacity, $refillRate);
-
-        return new self(StoreType::REDIS, $limiterType, $store, $config);
+        return new self(StoreType::REDIS, $limiterType, $store, new LimiterConfig($capacity, $refillRate));
     }
 
     /**
-     * 使用 Memcached 存储创建限流器
+     * 使用 Memcached 存储
      */
     public static function memcached(
         LimiterType $limiterType = LimiterType::TOKEN_BUCKET,
@@ -152,14 +219,16 @@ class Limiter
         string $host = '127.0.0.1',
         int $port = 11211
     ): self {
-        $store = MemcachedStore::create($host, $port);
-        $config = new LimiterConfig($capacity, $refillRate);
-
-        return new self(StoreType::MEMORY, $limiterType, $store, $config);
+        return new self(
+            StoreType::MEMCACHED,
+            $limiterType,
+            MemcachedStore::create($host, $port),
+            new LimiterConfig($capacity, $refillRate)
+        );
     }
 
     /**
-     * 使用 PDO 存储创建限流器
+     * 使用 PDO 数据库存储
      */
     public static function pdo(
         LimiterType $limiterType = LimiterType::TOKEN_BUCKET,
@@ -167,227 +236,281 @@ class Limiter
         float $refillRate = 1.0,
         string $dsn = 'sqlite::memory:',
         ?string $username = null,
-        ?string $password = null
+        ?string $password = null,
+        string $table = 'limiting'
     ): self {
-        $pdo = new \PDO($dsn, $username, $password);
-        $store = new PdoStore($pdo);
-        $config = new LimiterConfig($capacity, $refillRate);
+        $pdo = new \PDO($dsn, $username, $password, [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
 
-        return new self(StoreType::MEMORY, $limiterType, $store, $config);
+        return new self(
+            StoreType::PDO,
+            $limiterType,
+            new PdoStore($pdo, $table),
+            new LimiterConfig($capacity, $refillRate)
+        );
     }
 
     /**
-     * 创建任务并发控制器
+     * 使用 APCu 共享内存存储（单机多进程）
      */
-    public static function task(int $maxConcurrency = 10): TaskLimiter
+    public static function apcu(
+        LimiterType $limiterType = LimiterType::TOKEN_BUCKET,
+        int $capacity = 10,
+        float $refillRate = 1.0
+    ): self {
+        return new self(
+            StoreType::APCU,
+            $limiterType,
+            ApcuStore::create(),
+            new LimiterConfig($capacity, $refillRate)
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // 并发控制工厂
+    // ---------------------------------------------------------------------
+
+    public static function task(int $maxConcurrency = 10, ?StoreInterface $store = null): TaskLimiter
     {
-        return TaskLimiter::create($maxConcurrency, $maxConcurrency, 1.0);
+        return TaskLimiter::create($maxConcurrency, $store);
+    }
+
+    public static function process(int $maxConcurrency = 10, ?StoreInterface $store = null): ProcessLimiter
+    {
+        return ProcessLimiter::create($maxConcurrency, $store);
+    }
+
+    public static function fiber(int $maxConcurrency = 10, ?StoreInterface $store = null): FiberLimiter
+    {
+        return FiberLimiter::create($maxConcurrency, $store);
+    }
+
+    public static function semaphore(int $maxSlots = 10, ?StoreInterface $store = null): Semaphore
+    {
+        return new Semaphore($maxSlots, $store ?? new MemoryStore());
     }
 
     /**
-     * 创建进程并发控制器
-     */
-    public static function process(int $maxConcurrency = 10): ProcessLimiter
-    {
-        return ProcessLimiter::getInstance($maxConcurrency, $maxConcurrency, 1.0);
-    }
-
-    /**
-     * 创建 Fiber 并发控制器
-     */
-    public static function fiber(int $maxConcurrency = 10): FiberLimiter
-    {
-        return new FiberLimiter($maxConcurrency, $maxConcurrency, 1.0, new MemoryStore());
-    }
-
-    /**
-     * 创建中间件
+     * 创建限流中间件
      */
     public static function middleware(
         LimiterType $limiterType = LimiterType::TOKEN_BUCKET,
         int $capacity = 10,
         float $refillRate = 1.0,
-        ?StoreInterface $store = null
+        ?StoreInterface $store = null,
+        string $name = 'default'
     ): LimiterMiddleware {
-        $store ??= new MemoryStore();
-        $config = new LimiterConfig($capacity, $refillRate);
-        $limiter = self::createLimiter($limiterType, $store, $config);
+        $limiter = $limiterType->create(
+            $store ?? new MemoryStore(),
+            new LimiterConfig($capacity, $refillRate)
+        );
 
-        return new LimiterMiddleware($limiter);
+        return new LimiterMiddleware($limiter, $name);
     }
 
+    // ---------------------------------------------------------------------
+    // 流式配置（返回新实例，保持不可变）
+    // ---------------------------------------------------------------------
+
+    public function withCapacity(int $capacity): self
+    {
+        return new self($this->storeType, $this->limiterType, $this->store, $this->config->withCapacity($capacity));
+    }
+
+    public function withRate(float $rate): self
+    {
+        return new self($this->storeType, $this->limiterType, $this->store, $this->config->withRefillRate($rate));
+    }
+
+    public function withTtl(int $ttl): self
+    {
+        return new self($this->storeType, $this->limiterType, $this->store, $this->config->withTtl($ttl));
+    }
+
+    public function withPrefix(string $prefix): self
+    {
+        return new self($this->storeType, $this->limiterType, $this->store, $this->config->withPrefix($prefix));
+    }
+
+    public function withStore(StoreInterface $store): self
+    {
+        return new self(self::detectStoreType($store), $this->limiterType, $store, $this->config);
+    }
+
+    public function withType(LimiterType $type): self
+    {
+        return new self($this->storeType, $type, $this->store, $this->config);
+    }
+
+    // ---------------------------------------------------------------------
+    // 运行期
+    // ---------------------------------------------------------------------
+
     /**
-     * 创建限流器实例
+     * 构建（并缓存）底层算法实例
      */
     public function build(): RateLimiterInterface
     {
-        if ($this->limiter === null) {
-            $this->limiter = self::createLimiter($this->limiterType, $this->store, $this->config);
-        }
-
-        return $this->limiter;
+        return $this->limiter ??= $this->limiterType->create($this->store, $this->config);
     }
 
-    /**
-     * 检查是否允许操作
-     */
+    #[\Override]
     public function allow(string $key, int $tokens = 1): bool
     {
         return $this->build()->allow($key, $tokens);
     }
 
+    #[\Override]
+    public function check(string $key, int $tokens = 1): LimiterResult
+    {
+        return $this->build()->check($key, $tokens);
+    }
+
+    #[\Override]
+    public function consume(string $key, int $tokens = 1): LimiterResult
+    {
+        return $this->build()->consume($key, $tokens);
+    }
+
     /**
-     * 获取剩余可用数量
+     * 消耗额度，超限直接抛出 429 异常
+     *
+     * @throws RateLimitExceededException
      */
+    public function consumeOrFail(string $key, int $tokens = 1): LimiterResult
+    {
+        $result = $this->consume($key, $tokens);
+
+        if ($result->isDenied()) {
+            throw new RateLimitExceededException($key, $result);
+        }
+
+        return $result;
+    }
+
+    #[\Override]
     public function getRemaining(string $key): float
     {
         return $this->build()->getRemaining($key);
     }
 
-    /**
-     * 获取等待时间
-     */
+    #[\Override]
     public function getWaitTime(string $key): float
     {
         return $this->build()->getWaitTime($key);
     }
 
-    /**
-     * 重置限流器
-     */
+    #[\Override]
     public function reset(string $key): void
     {
         $this->build()->reset($key);
     }
 
-    /**
-     * 获取当前存储
-     */
+    #[\Override]
+    public function getCapacity(): int
+    {
+        return $this->config->capacity;
+    }
+
     public function getStore(): StoreInterface
     {
         return $this->store;
     }
 
-    /**
-     * 获取当前配置
-     */
     public function getConfig(): LimiterConfig
     {
         return $this->config;
     }
 
+    public function getStoreType(): StoreType
+    {
+        return $this->storeType;
+    }
+
+    public function getLimiterType(): LimiterType
+    {
+        return $this->limiterType;
+    }
+
     /**
-     * 创建限流器实例
+     * 包装成中间件
      */
-    private static function createLimiter(
-        LimiterType $type,
-        StoreInterface $store,
-        LimiterConfig $config
-    ): RateLimiterInterface {
-        return match ($type) {
-            LimiterType::TOKEN_BUCKET => TokenBucket::fromConfig($store, $config),
-            LimiterType::SLIDING_WINDOW => SlidingWindow::fromConfig($store, $config),
+    public function toMiddleware(string $name = 'default'): LimiterMiddleware
+    {
+        return new LimiterMiddleware($this->build(), $name);
+    }
+
+    // ---------------------------------------------------------------------
+    // 内部：存储解析
+    // ---------------------------------------------------------------------
+
+    /**
+     * @param StoreInterface|string|array<string, mixed>|null $store
+     */
+    private static function resolveStore(StoreInterface|string|array|null $store): StoreInterface
+    {
+        return match (true) {
+            $store instanceof StoreInterface => $store,
+            is_string($store) => self::storeFromType(
+                StoreType::tryFrom($store) ?? throw new InvalidConfigurationException("未知的存储类型：{$store}")
+            ),
+            is_array($store) => self::storeFromArray($store),
+            default => new MemoryStore(),
         };
     }
 
     /**
-     * 解析存储实例
+     * @param array<string, mixed> $config
      */
-    private function resolveStore(StoreInterface|array|null $store): StoreInterface
+    private static function storeFromArray(array $config): StoreInterface
     {
-        if ($store instanceof StoreInterface) {
-            return $store;
-        }
-
-        if (is_array($store)) {
-            return $this->createStoreFromConfig($store);
-        }
-
-        return $this->createDefaultStore();
-    }
-
-    /**
-     * 解析配置
-     */
-    private function resolveConfig(LimiterConfig|array|null $config): LimiterConfig
-    {
-        if ($config instanceof LimiterConfig) {
-            return $config;
-        }
-
-        if (is_array($config)) {
-            return new LimiterConfig(
-                $config['capacity'] ?? 10,
-                (float) ($config['refillRate'] ?? 1.0),
-                $config['ttl'] ?? 3600,
-                $config['prefix'] ?? 'limiter:'
-            );
-        }
-
-        return new LimiterConfig(10, 1.0);
-    }
-
-    /**
-     * 创建默认存储
-     */
-    private function createDefaultStore(): StoreInterface
-    {
-        return match ($this->storeType) {
-            StoreType::MEMORY => new MemoryStore(),
-            StoreType::REDIS => RedisStore::create('127.0.0.1', 6379, 'kode:limiting:', null, 0),
-        };
-    }
-
-    /**
-     * 从配置创建存储
-     */
-    private function createStoreFromConfig(array $config): StoreInterface
-    {
-        $type = StoreType::tryFrom($config['type'] ?? 'memory') ?? StoreType::MEMORY;
+        $type = StoreType::tryFrom((string) ($config['type'] ?? 'memory')) ?? StoreType::MEMORY;
 
         return match ($type) {
             StoreType::MEMORY => new MemoryStore(),
+            StoreType::APCU => ApcuStore::create((string) ($config['prefix'] ?? 'kode:limiting:')),
             StoreType::REDIS => RedisStore::create(
-                $config['host'] ?? '127.0.0.1',
-                $config['port'] ?? 6379,
-                'kode:limiting:',
-                $config['password'] ?? null,
-                $config['database'] ?? 0
+                (string) ($config['host'] ?? '127.0.0.1'),
+                (int) ($config['port'] ?? 6379),
+                (string) ($config['prefix'] ?? 'kode:limiting:'),
+                isset($config['password']) ? (string) $config['password'] : null,
+                (int) ($config['database'] ?? 0)
+            ),
+            StoreType::MEMCACHED => MemcachedStore::create(
+                (string) ($config['host'] ?? '127.0.0.1'),
+                (int) ($config['port'] ?? 11211),
+                (string) ($config['prefix'] ?? 'kode:limiting:')
+            ),
+            StoreType::PDO => new PdoStore(
+                new \PDO(
+                    (string) ($config['dsn'] ?? 'sqlite::memory:'),
+                    isset($config['username']) ? (string) $config['username'] : null,
+                    isset($config['password']) ? (string) $config['password'] : null,
+                    [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]
+                ),
+                (string) ($config['table'] ?? 'limiting')
             ),
         };
     }
 
-    /**
-     * 解析存储实例（静态方法）
-     */
-    private static function resolveStoreInstance(StoreInterface|string|array|null $store): StoreInterface
+    private static function storeFromType(StoreType $type): StoreInterface
     {
-        if ($store instanceof StoreInterface) {
-            return $store;
-        }
+        return match ($type) {
+            StoreType::MEMORY => new MemoryStore(),
+            StoreType::APCU => ApcuStore::create(),
+            StoreType::REDIS => RedisStore::create(),
+            StoreType::MEMCACHED => MemcachedStore::create(),
+            StoreType::PDO => PdoStore::createSqlite(),
+        };
+    }
 
-        if (is_string($store)) {
-            return match ($store) {
-                'redis' => RedisStore::create('127.0.0.1', 6379, 'kode:limiting:', null, 0),
-                'memcached' => MemcachedStore::create(),
-                default => new MemoryStore(),
-            };
-        }
-
-        if (is_array($store)) {
-            $type = StoreType::tryFrom($store['type'] ?? 'memory') ?? StoreType::MEMORY;
-            return match ($type) {
-                StoreType::MEMORY => new MemoryStore(),
-                StoreType::REDIS => RedisStore::create(
-                    $store['host'] ?? '127.0.0.1',
-                    $store['port'] ?? 6379,
-                    'kode:limiting:',
-                    $store['password'] ?? null,
-                    $store['database'] ?? 0
-                ),
-            };
-        }
-
-        return new MemoryStore();
+    private static function detectStoreType(StoreInterface $store): StoreType
+    {
+        return match (true) {
+            $store instanceof RedisStore => StoreType::REDIS,
+            $store instanceof MemcachedStore => StoreType::MEMCACHED,
+            $store instanceof PdoStore => StoreType::PDO,
+            $store instanceof ApcuStore => StoreType::APCU,
+            default => StoreType::MEMORY,
+        };
     }
 }

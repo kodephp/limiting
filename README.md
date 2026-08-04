@@ -1,22 +1,22 @@
 # kode/limiting
 
-高性能 PHP 限流器，支持令牌桶、滑动窗口算法，可用于本地和分布式限流。
+高性能 PHP 限流器，支持令牌桶、漏桶、滑动窗口、滑动窗口计数器、固定窗口计数器与多规则**组合限流**；内置内存 / APCu / Redis / Memcached / PDO 存储与分布式并发控制。PHP 8.3+。
 
 ## 功能特性
 
-- **令牌桶算法**：支持突发流量，按固定速率补充令牌
-- **滑动窗口算法**：基于时间窗口的精确限流
-- **本地限流**：使用内存存储，适用于单进程
-- **分布式限流**：使用 Redis，支持单机/Sentinel/Cluster 模式
-- **并发控制**：支持任务、进程、Fiber 协程的本地和分布式限流
-- **原子操作**：Lua 脚本保证分布式环境下的原子性
-- **高可用**：支持 Redis Sentinel 和 Cluster 自动故障转移
-- **PHP 8.2+**：使用 readonly、enum 等新特性优化性能
+- **五种限流算法**：令牌桶（支持突发）、漏桶（抑制突发）、滑动窗口（精确日志）、滑动窗口计数器（加权近似、内存恒定）、固定窗口计数器。
+- **组合限流**：`CompositeLimiter` 将多条规则串联，全部通过才放行（两阶段：预检 + 提交回滚）。
+- **多存储驱动**：内存（单进程）、APCu（单机多进程）、Redis / Memcached / PDO（分布式，跨机器一致）。
+- **并发控制**：任务 / 进程 / Fiber 协程的本地与分布式并发上限，底层统一为共享槽位**计数信号量**。
+- **分布式原子性**：Redis Lua 脚本保证「读取→补充→扣减→写回」原子执行，支持单机 / Sentinel / Cluster。
+- **声明式注解**：`#[RateLimit]` 标注在控制器上，由框架中间件反射读取。
+- **结构化结果**：`LimiterResult` 携带剩余额度、重试等待、429 响应头，可直接接入各类框架。
+- **PHP 8.3+**：使用 `#[\Override]`、typed class constants、`json_validate()` 等新特性。
 
 ## 系统要求
 
-- PHP >= 8.2
-- 可选：Redis 扩展（用于分布式部署）
+- **PHP >= 8.3**
+- 可选扩展（按所用存储驱动）：`ext-redis`、`ext-apcu`、`ext-memcached`、`ext-pdo`
 
 ## 安装
 
@@ -24,55 +24,49 @@
 composer require kode/limiting
 ```
 
-## 统一入口（推荐）
-
-使用 `Limiter` 类可以更简洁地创建各种限流器：
+## 统一入口 `Limiter`（推荐）
 
 ```php
 use Kode\Limiting\Limiter;
 
-// 令牌桶限流器（默认）
-$limiter = Limiter::tokenBucket(100, 10.0);
-$limiter->allow('api:user:123');
+// 令牌桶（默认，支持突发）
+Limiter::tokenBucket(100, 10.0)->allow('api:user:123');
 
-// 滑动窗口限流器
-$limiter = Limiter::slidingWindow(100, 60.0);
+// 滑动窗口（精确日志）
+Limiter::slidingWindow(100, 60.0)->allow('api:user:123');
 
-// 漏桶限流器
-$limiter = Limiter::leakyBucket(100, 1.0);
+// 滑动窗口计数器（加权近似，内存恒定）
+Limiter::slidingWindowCounter(100, 60)->allow('api:user:123');
 
-// 计数器限流器
-$limiter = Limiter::counter(1000, 60);
+// 漏桶（抑制突发）
+Limiter::leakyBucket(100, 1.0)->allow('api:user:123');
 
-// Redis 分布式限流器
-$limiter = Limiter::redis(
-    \Kode\Limiting\Enum\LimiterType::TOKEN_BUCKET,
-    100, 10.0,
-    '127.0.0.1', 6379
-);
+// 固定窗口计数器
+Limiter::counter(1000, 60)->allow('api:user:123');
 
-// Memcached 分布式限流器
-$limiter = Limiter::memcached(
-    \Kode\Limiting\Enum\LimiterType::TOKEN_BUCKET,
-    100, 10.0,
-    '127.0.0.1', 11211
-);
+// 分布式：Redis / Memcached / PDO / APCu
+Limiter::redis(LimiterType::TOKEN_BUCKET, 100, 10.0, '127.0.0.1', 6379);
+Limiter::memcached(LimiterType::TOKEN_BUCKET, 100, 10.0, '127.0.0.1', 11211);
+Limiter::pdo(LimiterType::TOKEN_BUCKET, 100, 10.0, 'mysql:host=127.0.0.1;dbname=limiting', 'root', 'password');
+Limiter::apcu(LimiterType::TOKEN_BUCKET, 100, 10.0);
 
-// PDO 分布式限流器
-$limiter = Limiter::pdo(
-    \Kode\Limiting\Enum\LimiterType::TOKEN_BUCKET,
-    100, 10.0,
-    'mysql:host=127.0.0.1;dbname=limiting', 'root', 'password'
-);
+// 多规则组合：10 次/秒 且 100 次/分钟
+Limiter::composite([
+    'per_second' => Limiter::tokenBucket(10, 10.0)->build(),
+    'per_minute' => Limiter::counter(100, 60)->build(),
+])->allow('api:user:123');
 
-// 并发控制器
-$taskLimiter = Limiter::task(10);      // 任务并发控制
-$processLimiter = Limiter::process(10); // 进程并发控制
-$fiberLimiter = Limiter::fiber(10);     // Fiber 并发控制
+// 并发控制
+Limiter::task(10);      // 任务并发
+Limiter::process(10);   // 进程并发
+Limiter::fiber(10);     // Fiber 并发
+Limiter::semaphore(10); // 计数信号量
 
 // 中间件
-$middleware = Limiter::middleware(\Kode\Limiting\Enum\LimiterType::TOKEN_BUCKET, 100, 10.0);
+$middleware = Limiter::middleware(LimiterType::TOKEN_BUCKET, 100, 10.0);
 ```
+
+`Limiter` 实例方法：`allow()` / `check()`（返回 `LimiterResult`）/ `consume()` / `consumeOrFail()`（超限抛 `RateLimitExceededException`）/ `getRemaining()` / `getWaitTime()` / `reset()` / `getCapacity()`；流式配置 `withCapacity()` / `withRate()` / `withTtl()` / `withPrefix()` / `withStore()` / `withType()`（均返回新实例，保持不可变）。
 
 ## 快速开始
 
@@ -95,59 +89,35 @@ echo "剩余令牌: " . $bucket->getRemaining('user:123');
 echo "等待时间: " . $bucket->getWaitTime('user:123') . "秒";
 ```
 
-### 滑动窗口限流
+### 组合限流
 
 ```php
-use Kode\Limiting\Algorithm\SlidingWindow;
+use Kode\Limiting\Algorithm\CompositeLimiter;
+use Kode\Limiting\Algorithm\TokenBucket;
+use Kode\Limiting\Algorithm\Counter;
 use Kode\Limiting\Store\MemoryStore;
 
-$window = new SlidingWindow($store, 100, 1.0);
+$composite = new CompositeLimiter([
+    'per_second' => new TokenBucket(new MemoryStore(), 10, 10.0, 3600, 'c:'),
+    'per_minute' => new Counter(new MemoryStore(), 100, 60, 'c:'),
+]);
 
-if ($window->allow('api:v1', 1)) {
-    echo "请求通过";
+if ($composite->allow('user:1')) {
+    // 两条规则同时放行
 }
+
+// 定位最先拒绝的规则，便于日志排障
+$rule = $composite->firstDeniedRule('user:1');
 ```
 
-### 分布式限流（跨机器）
-
-```php
-use Kode\Limiting\Distributed\DistributedLimiter;
-
-// 单机模式
-$limiter = DistributedLimiter::create(
-    '127.0.0.1', 6379,
-    1000,    // 容量
-    100.0    // 每秒补充100个令牌
-);
-
-// Sentinel 高可用模式
-$limiter = DistributedLimiter::createSentinel(
-    ['192.168.1.1:26379', '192.168.1.2:26379'],
-    'mymaster',
-    1000,
-    100.0
-);
-
-// Cluster 分片模式
-$limiter = DistributedLimiter::createCluster(
-    ['192.168.1.1:6379', '192.168.1.2:6379', '192.168.1.3:6379'],
-    1000,
-    100.0
-);
-
-if ($limiter->allow('global:api', 1)) {
-    echo "请求通过";
-}
-```
-
-### 并发任务控制
+### 并发控制（共享槽位信号量）
 
 ```php
 use Kode\Limiting\Concurrency\TaskLimiter;
 
-$limiter = TaskLimiter::create(10, 10, 1.0);
+// v2.0 签名：create(最大并发, ?存储, 前缀)
+$limiter = TaskLimiter::create(5);
 
-// 手动获取和释放
 if ($limiter->tryAcquire('task:1')) {
     try {
         do_something();
@@ -156,323 +126,180 @@ if ($limiter->tryAcquire('task:1')) {
     }
 }
 
-// 自动释放
+// 自动释放：槽位在回调结束后释放（成功或异常皆然）
 $result = $limiter->run('task:2', fn() => do_something());
 
-// 阻塞等待
-$limiter->acquire('task:3', 30.0);
+$limiter->getActiveCount(); // 当前活跃数
+$limiter->getAvailable();   // 剩余可用槽位
 ```
 
-## 架构设计
+> **v2.0 迁移提示**：v1.x 的 `TaskLimiter::create($max, $capacity, $rate)`、`ProcessLimiter::getInstance($max, $capacity, $rate)`、`new FiberLimiter($max, $capacity, $rate, $store)` 已全部改为「共享槽位信号量」语义。并发上限现在真实生效，旧签名不再兼容。
+
+### 分布式限流（跨机器）
+
+```php
+use Kode\Limiting\Distributed\DistributedLimiter;
+
+// 单机
+$limiter = DistributedLimiter::create('127.0.0.1', 6379, 1000, 100.0);
+// Sentinel 高可用
+$limiter = DistributedLimiter::createSentinel(
+    ['192.168.1.1:26379', '192.168.1.2:26379'], 'mymaster', 1000, 100.0
+);
+// Cluster 分片
+$limiter = DistributedLimiter::createCluster(
+    ['192.168.1.1:6379', '192.168.1.2:6379', '192.168.1.3:6379'], 1000, 100.0
+);
+
+if ($limiter->allow('global:api', 1)) {
+    echo "请求通过";
+}
+
+// 批量判定：返回 [放行的 key, 被限流的 key]
+[$ok, $denied] = $limiter->allowBatch(['k1', 'k2', 'k3']);
+```
+
+### 声明式注解
+
+```php
+use Kode\Limiting\Attribute\RateLimit;
+
+#[RateLimit(capacity: 60, rate: 1.0, key: 'api:{user_id}')]
+public function index(): Response { /* ... */ }
+
+// 运行期渲染 key
+$key = $attr->resolveKey(['user_id' => 42]); // => 'api:42'
+```
+
+## 架构
 
 ```
 src/
-├── Limiter.php                    # 统一入口类
-├── DTO/                          # 数据传输对象
-│   ├── LimiterConfig.php        # 限流器配置（readonly）
-│   └── LimiterResult.php        # 限流结果（readonly）
-├── Enum/                         # 枚举类型
-│   ├── LimiterType.php          # 限流器类型
-│   ├── StoreType.php            # 存储类型
-│   └── RedisMode.php           # Redis 模式
-├── Store/                        # 存储层
-│   ├── StoreInterface.php       # 存储接口
-│   ├── MemoryStore.php          # 内存存储
-│   ├── RedisStore.php           # Redis 存储（支持 Sentinel/Cluster）
-│   ├── MemcachedStore.php       # Memcached 存储
-│   └── PdoStore.php            # PDO 存储（MySQL/SQLite/PostgreSQL）
-├── Algorithm/                    # 限流算法
-│   ├── RateLimiterInterface.php # 限流器接口
-│   ├── TokenBucket.php          # 令牌桶
-│   ├── SlidingWindow.php        # 滑动窗口
-│   ├── LeakyBucket.php          # 漏桶
-│   └── Counter.php              # 计数器
-├── Distributed/                   # 分布式限流
-│   ├── DistributedLimiter.php           # 分布式令牌桶
-│   ├── DistributedTaskLimiter.php       # 分布式任务限流
-│   ├── DistributedProcessLimiter.php    # 分布式进程限流
-│   └── DistributedFiberLimiter.php      # 分布式 Fiber 限流
-├── Concurrency/                   # 本地并发控制
-│   ├── TaskLimiter.php           # 任务限流
-│   ├── ProcessLimiter.php        # 进程限流
-│   └── FiberLimiter.php         # Fiber 限流
-└── Middleware/                    # 中间件
-    ├── LimiterMiddleware.php          # 限流中间件
-    └── LimiterMiddlewareInterface.php # 中间件接口
+├── Limiter.php                      # 统一入口类
+├── Attribute/RateLimit.php          # 声明式限流注解
+├── DTO/
+│   ├── LimiterConfig.php            # 限流配置（不可变，构造即校验）
+│   └── LimiterResult.php            # 限流结果（不可变，含 429 响应头）
+├── Enum/
+│   ├── LimiterType.php              # 算法类型
+│   ├── StoreType.php                # 存储类型
+│   └── RedisMode.php               # Redis 模式
+├── Exception/                       # 异常体系（接口 + 4 个实现）
+├── Store/                           # 存储层
+│   ├── StoreInterface.php           # 存储接口
+│   ├── MemoryStore.php              # 内存存储
+│   ├── ApcuStore.php               # APCu 存储（单机多进程）
+│   ├── RedisStore.php              # Redis 存储（Sentinel/Cluster + Lua）
+│   ├── MemcachedStore.php          # Memcached 存储
+│   └── PdoStore.php               # PDO 存储（MySQL/SQLite/PostgreSQL）
+├── Algorithm/                       # 限流算法
+│   ├── RateLimiterInterface.php     # 统一接口（allow/check/consume/...）
+│   ├── AbstractRateLimiter.php      # 公共基类（校验/JSON 状态读写）
+│   ├── TokenBucket.php              # 令牌桶
+│   ├── SlidingWindow.php            # 滑动窗口（精确日志）
+│   ├── SlidingWindowCounter.php     # 滑动窗口计数器（加权近似）
+│   ├── LeakyBucket.php              # 漏桶
+│   ├── Counter.php                  # 固定窗口计数器
+│   └── CompositeLimiter.php        # 组合限流
+├── Distributed/                     # 分布式限流
+│   ├── DistributedLimiter.php       # 分布式令牌桶（Lua）
+│   ├── AbstractDistributedSemaphore.php
+│   ├── DistributedTaskLimiter.php
+│   ├── DistributedProcessLimiter.php
+│   └── DistributedFiberLimiter.php
+├── Concurrency/                     # 本地并发控制
+│   ├── Semaphore.php                # 计数信号量（公共内核）
+│   ├── TaskLimiter.php
+│   ├── ProcessLimiter.php
+│   └── FiberLimiter.php
+└── Middleware/
+    ├── LimiterMiddleware.php        # 限流中间件（handle 管道 + 响应头）
+    └── LimiterMiddlewareInterface.php
 ```
 
-## API 文档
+## API 速查
 
 ### StoreInterface
 
-存储接口，所有存储实现必须实现此接口。
-
 ```php
 public function get(string $key): ?string;              // 获取值
-public function set(string $key, string $value, int $ttl = 0): void;  // 设置值
+public function set(string $key, string $value, int $ttl = 0): void; // 设置值，ttl=0 不过期
 public function delete(string $key): void;             // 删除键
-public function incr(string $key, int $step = 1): int; // 原子递增
-public function ttl(string $key): int;                 // 获取 TTL
+public function incr(string $key, int $step = 1, int $ttl = 0): int; // 原子递增
+public function decr(string $key, int $step = 1): int; // 原子递减
+public function ttl(string $key): int;                 // 剩余 TTL（>=0 / -1 永不过期 / -2 不存在）
+public function has(string $key): bool;                // 键是否存在且未过期
 ```
 
 ### RateLimiterInterface
 
-限流器接口。
-
 ```php
-public function allow(string $key, int $tokens = 1): bool;  // 检查是否允许
-public function getRemaining(string $key): float;            // 获取剩余数量
-public function getWaitTime(string $key): float;             // 获取等待时间
-public function reset(string $key): void;                    // 重置
+public function allow(string $key, int $tokens = 1): bool;        // 是否放行
+public function check(string $key, int $tokens = 1): LimiterResult; // 只读探测
+public function consume(string $key, int $tokens = 1): LimiterResult; // 消耗并返回结果
+public function getRemaining(string $key): float;                // 剩余额度
+public function getWaitTime(string $key): float;                 // 建议等待秒数
+public function reset(string $key): void;                       // 重置
+public function getCapacity(): int;                              // 总额度
 ```
 
-### Limiter（统一入口）
-
-统一入口类，提供简洁的 API 创建限流器。
-
-```php
-// 工厂方法
-Limiter::tokenBucket(int $capacity, float $refillRate, $store);      // 令牌桶
-Limiter::slidingWindow(int $capacity, float $windowSize, $store);    // 滑动窗口
-Limiter::leakyBucket(int $capacity, float $leakRate, $store);       // 漏桶
-Limiter::counter(int $maxRequests, int $windowSeconds, $store);      // 计数器
-Limiter::redis(LimiterType, int $capacity, float $refillRate, ...); // Redis 限流
-Limiter::memcached(LimiterType, int $capacity, float $refillRate, ...); // Memcached 限流
-Limiter::pdo(LimiterType, int $capacity, float $refillRate, ...);    // PDO 限流
-Limiter::task(int $maxConcurrency);    // 任务并发控制器
-Limiter::process(int $maxConcurrency); // 进程并发控制器
-Limiter::fiber(int $maxConcurrency);  // Fiber 并发控制器
-Limiter::middleware(LimiterType, int $capacity, float $refillRate);  // 中间件
-
-// 实例方法
-$limiter->allow(string $key, int $tokens);   // 检查是否允许
-$limiter->getRemaining(string $key);         // 获取剩余数量
-$limiter->getWaitTime(string $key);          // 获取等待时间
-$limiter->reset(string $key);                // 重置
-$limiter->build();                           // 获取底层限流器
-$limiter->getStore();                        // 获取存储
-$limiter->getConfig();                       // 获取配置
-```
-
-### TokenBucket
-
-令牌桶限流算法。
-
-```php
-$bucket = new TokenBucket($store, $capacity, $refillRate, $ttl = 3600, $prefix = 'bucket:');
-
-$bucket->allow('key', 1);           // 检查是否允许
-$bucket->getRemaining('key');        // 获取剩余令牌数
-$bucket->getWaitTime('key');         // 获取等待时间
-$bucket->reset('key');               // 重置
-$bucket->getCapacity();              // 获取容量
-$bucket->getRefillRate();           // 获取补充速率
-$bucket->getTtl();                  // 获取 TTL
-$bucket->check('key', 1);           // 检查并返回 LimiterResult
-```
-
-### SlidingWindow
-
-滑动窗口限流算法。
-
-```php
-$window = new SlidingWindow($store, $capacity, $windowSize = 1.0, $ttl = 3600, $prefix = 'sw:');
-
-$window->allow('key', 1);           // 检查是否允许
-$window->getRemaining('key');        // 获取剩余请求数
-$window->getWaitTime('key');         // 获取等待时间
-$window->reset('key');               // 重置
-$window->getCapacity();               // 获取容量
-$window->getWindowSize();            // 获取窗口大小
-$window->check('key', 1);           // 检查并返回 LimiterResult
-```
-
-### DistributedLimiter
-
-分布式限流器（基于 Redis）。
-
-```php
-// 单机模式
-$limiter = DistributedLimiter::create($host, $port, $capacity, $refillRate, $password, $database);
-
-// Sentinel 模式
-$limiter = DistributedLimiter::createSentinel($sentinels, $masterName, $capacity, $refillRate);
-
-// Cluster 模式
-$limiter = DistributedLimiter::createCluster($nodes, $capacity, $refillRate);
-
-// 方法
-$limiter->allow('key', 1);                    // 检查是否允许（原子操作）
-$limiter->tryAcquire('key', 1);               // 尝试获取（别名）
-$limiter->getRemaining('key');                 // 获取剩余令牌数
-$limiter->getWaitTime('key');                  // 获取等待时间
-$limiter->reset('key');                        // 重置
-$limiter->allowBatch(['key1', 'key2'], 1);     // 批量检查
-$limiter->check('key', 1);                     // 检查并返回 LimiterResult
-```
-
-### 分布式并发控制器
-
-```php
-use Kode\Limiting\Distributed\DistributedTaskLimiter;
-use Kode\Limiting\Distributed\DistributedProcessLimiter;
-use Kode\Limiting\Distributed\DistributedFiberLimiter;
-
-$taskLimiter = DistributedTaskLimiter::create('127.0.0.1', 6379, 10);
-$processLimiter = DistributedProcessLimiter::create('127.0.0.1', 6379, 10);
-$fiberLimiter = DistributedFiberLimiter::create('127.0.0.1', 6379, 100);
-
-$taskLimiter->tryAcquire('task:1');           // 非阻塞获取
-$taskLimiter->acquire('task:1', 30.0);        // 阻塞等待
-$taskLimiter->run('task:1', fn() => null);   // 执行任务
-$taskLimiter->release('task:1');               // 释放
-$taskLimiter->getActiveCount();                // 当前活跃数
-```
-
-### 本地并发控制器
-
-```php
-use Kode\Limiting\Concurrency\TaskLimiter;
-use Kode\Limiting\Concurrency\ProcessLimiter;
-use Kode\Limiting\Concurrency\FiberLimiter;
-
-$taskLimiter = TaskLimiter::create($maxConcurrency, $capacity, $refillRate);
-$processLimiter = ProcessLimiter::getInstance($maxProcesses, $capacity, $refillRate);
-$fiberLimiter = new FiberLimiter($maxFibers, $capacity, $refillRate, $store);
-
-$taskLimiter->tryAcquire('task:1');
-$taskLimiter->acquire('task:1', 30.0);
-$taskLimiter->run('task:1', fn() => null);
-$taskLimiter->release('task:1');
-$taskLimiter->getMaxConcurrency();
-```
-
-### DTO 对象
-
-#### LimiterConfig
-
-限流器配置（不可变对象）。
-
-```php
-$config = new LimiterConfig($capacity, $refillRate, $ttl = 3600, $prefix = 'limiter:');
-
-$config->capacity;      // 容量
-$config->refillRate;    // 补充速率
-$config->ttl;           // TTL
-$config->prefix;        // 前缀
-
-// 链式调用创建新实例
-$newConfig = $config->withCapacity(200)->withRefillRate(20.0);
-```
-
-#### LimiterResult
-
-限流结果（不可变对象）。
+### LimiterResult
 
 ```php
 $result = $bucket->check('key', 1);
 
-$result->allowed;       // 是否允许
-$result->remaining;    // 剩余数量
-$result->waitTime;     // 等待时间
-$result->timestamp;    // 时间戳
+$result->allowed;        // 是否放行
+$result->remaining;      // 剩余额度
+$result->retryAfter;     // 建议重试等待秒数（放行时为 0）
+$result->limit;          // 总额度
+$result->resetAfter;     // 额度完全恢复所需秒数
+$result->timestamp;      // 结果产生时刻（毫秒）
 
-$result->isAllowed();   // 是否允许（布尔值）
-$result->toArray();     // 转换为数组
+$result->isAllowed();
+$result->isDenied();
+$result->toHeaders();     // ['X-RateLimit-Limit'=>..., 'X-RateLimit-Remaining'=>..., 'Retry-After'=>...]（被拒时）
+$result->toArray();
+json_encode($result);    // 等同 toArray()
 ```
 
-### 枚举类型
+### LimiterConfig
 
 ```php
-use Kode\Limiting\Enum\LimiterType;
-use Kode\Limiting\Enum\StoreType;
-use Kode\Limiting\Enum\RedisMode;
+$config = new LimiterConfig($capacity, $refillRate, $ttl = 3600, $prefix = 'limiter:');
+$config->capacity;
+$config->refillRate;
+$config->ttl;
+$config->prefix;
 
-LimiterType::TOKEN_BUCKET->label();      // 令牌桶
-LimiterType::SLIDING_WINDOW->label();    // 滑动窗口
+// 链式创建新实例（不可变）
+$newConfig = $config->withCapacity(200)->withRefillRate(20.0);
 
-StoreType::MEMORY->label();              // 内存存储
-StoreType::REDIS->label();               // Redis 存储
-
-RedisMode::STANDALONE->label();          // 单机模式
-RedisMode::SENTINEL->label();            // Sentinel 高可用
-RedisMode::CLUSTER->label();             // Cluster 分片
+// 从数组创建（兼容 capacity/limit、refillRate/refill_rate/window 等键名）
+$config = LimiterConfig::fromArray(['capacity' => 100, 'window' => 60]);
 ```
 
 ## 单元测试
 
-测试覆盖所有核心功能，共计 35 个测试用例。
-
-### 测试用例列表
-
-```
-Token Bucket (令牌桶)
- ✔ 允许首次请求
- ✔ 允许多次请求
- ✔ 超出容量拒绝
- ✔ 获取剩余令牌数
- ✔ 新键返回完整容量
- ✔ 获取等待时间
- ✔ 重置限流器
- ✔ 时间推移后补充令牌
-
-Sliding Window (滑动窗口)
- ✔ 容量内允许通过
- ✔ 超出容量拒绝
- ✔ 获取剩余请求数
- ✔ 请求后剩余数正确
- ✔ 重置限流器
- ✔ 可用时等待时间为0
- ✔ 耗尽时等待时间大于0
-
-Memory Store (内存存储)
- ✔ 设置和获取
- ✔ 获取不存在的键
- ✔ 删除键
- ✔ 递增操作
- ✔ 新键递增
- ✔ TTL 计算
- ✔ 清空存储
-
-Task Limiter (任务限流)
- ✔ 尝试获取许可
- ✔ 多次获取
- ✔ 释放许可
- ✔ 执行任务
- ✔ 获取最大并发数
-
-Process Limiter (进程限流)
- ✔ 尝试获取许可
- ✔ 释放许可
- ✔ 获取最大进程数
- ✔ 单例模式
-
-Fiber Limiter (Fiber 限流)
- ✔ 支持检查
- ✔ 尝试获取许可
- ✔ 释放许可
- ✔ 获取最大 Fiber 数
-```
-
-### 运行测试
+测试覆盖全部核心功能，共 **108 个测试用例、488 项断言**（PHPUnit 10.5/11，PHP 8.3），全绿。
 
 ```bash
-# 运行所有测试
+# 运行全部
+composer test            # 等价于 ./vendor/bin/phpunit --no-coverage
 ./vendor/bin/phpunit
 
-# 显示详细输出
+# 详细输出
 ./vendor/bin/phpunit --testdox
 
-# 运行指定测试类
-./vendor/bin/phpunit tests/TokenBucketTest.php
+# 单文件
+./vendor/bin/phpunit tests/CompositeLimiterTest.php
 
-# 生成覆盖率报告
+# 覆盖率
 ./vendor/bin/phpunit --coverage-html coverage
 ```
 
 ## 自定义存储
 
-实现 `StoreInterface` 接口即可：
+实现 `StoreInterface` 即可：
 
 ```php
 use Kode\Limiting\Store\StoreInterface;
@@ -482,113 +309,28 @@ class MyStore implements StoreInterface
     public function get(string $key): ?string { /* ... */ }
     public function set(string $key, string $value, int $ttl = 0): void { /* ... */ }
     public function delete(string $key): void { /* ... */ }
-    public function incr(string $key, int $step = 1): int { /* ... */ }
+    public function incr(string $key, int $step = 1, int $ttl = 0): int { /* ... */ }
+    public function decr(string $key, int $step = 1): int { /* ... */ }
     public function ttl(string $key): int { /* ... */ }
-}
-```
-
-## Redis 配置
-
-### 单机模式
-
-```php
-$limiter = DistributedLimiter::create(
-    '127.0.0.1',    // 主机
-    6379,           // 端口
-    1000,           // 容量
-    100.0,          // 补充速率
-    'password',     // 密码（可选）
-    0               // 数据库编号
-);
-```
-
-### Sentinel 模式
-
-```php
-$limiter = DistributedLimiter::createSentinel(
-    ['192.168.1.1:26379', '192.168.1.2:26379', '192.168.1.3:26379'],
-    'mymaster',     // 主节点名称
-    1000,
-    100.0,
-    'sentinel_pass'
-);
-```
-
-### Cluster 模式
-
-```php
-$limiter = DistributedLimiter::createCluster(
-    ['192.168.1.1:6379', '192.168.1.2:6379', '192.168.1.3:6379'],
-    1000,
-    100.0,
-    'cluster_pass'
-);
-```
-
-## 使用场景
-
-### API 限流
-
-```php
-$limiter = DistributedLimiter::create('127.0.0.1', 6379, 100, 10.0);
-
-$response = $limiter->allow('api:user:' . $userId, 1)
-    ? processRequest()
-    : new Response('Rate limited', 429);
-```
-
-### 秒杀活动
-
-```php
-$limiter = DistributedLimiter::create('127.0.0.1', 6379, 1000, 0);
-
-if (!$limiter->allow('seckill:' . $productId, 1)) {
-    throw new Exception('活动已结束');
-}
-```
-
-### 并发控制
-
-```php
-$limiter = DistributedTaskLimiter::create('127.0.0.1', 6379, 10);
-
-foreach ($tasks as $task) {
-    $limiter->run('task:' . $task['id'], function () use ($task) {
-        processTask($task);
-    });
+    public function has(string $key): bool { /* ... */ }
 }
 ```
 
 ## 开发
 
 ```bash
-# 安装依赖
 composer install
-
-# 运行测试
-./vendor/bin/phpunit
-
-# 语法检查
-find src -name "*.php" -exec php -l {} \;
+composer test        # 运行测试
+composer lint        # 语法检查（find src tests -name '*.php' -exec php -l）
 ```
 
-## 目录结构
+## 从 v1.x 升级到 v2.0
 
-```
-kode/limiting/
-├── src/
-│   ├── DTO/                       # 数据传输对象
-│   ├── Enum/                      # 枚举类型
-│   ├── Store/                     # 存储层
-│   ├── Algorithm/                 # 限流算法
-│   ├── Distributed/              # 分布式限流
-│   └── Concurrency/               # 并发控制
-├── tests/                         # 单元测试
-├── composer.json
-├── phpunit.xml
-├── LICENSE                        # Apache 2.0
-└── README.md
-```
+- **PHP**：最低要求 `>= 8.3`（原为 8.2）。
+- **并发限流器签名变更**：`TaskLimiter::create(int $maxConcurrency, ?StoreInterface $store = null, string $prefix = 'task:')`、`ProcessLimiter::getInstance(int $maxProcesses = 10, string $prefix = 'process:')`、`new FiberLimiter(int $maxFibers, StoreInterface $store = new MemoryStore(), string $prefix = 'fiber:')`。并发上限现在真实生效。
+- **`LimiterResult`**：旧版 `$result->waitTime` 更名为 `retryAfter`；构造时不再二次赋值 readonly 属性。
+- **`RedisStore::eval()`**：已重命名为 `evalScript(string $script, array $keys, array $args)`，分布式限流现在真正生效（v1.x 的 ARGV 被丢弃从未生效）。
+- **`Limiter::leakyBucket()` / `counter()`**：现在分别返回真正的漏桶与计数器（v1.x 一律返回令牌桶）。
 
 ## 许可证
 

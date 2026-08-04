@@ -4,147 +4,133 @@ declare(strict_types=1);
 
 namespace Kode\Limiting\Algorithm;
 
+use Kode\Limiting\DTO\LimiterConfig;
+use Kode\Limiting\Exception\InvalidConfigurationException;
 use Kode\Limiting\Store\StoreInterface;
 
 /**
- * 计数器限流器（简单固定窗口）
+ * 固定窗口计数器限流算法
  *
- * 特点：实现简单，适合固定速率限制
- * 在固定时间窗口内允许固定数量的请求
+ * 实现最简单、开销最低，缺点是窗口切换瞬间可能出现两倍突刺。
  *
- * 与滑动窗口的区别：
- * - 滑动窗口：精确控制，窗口内请求均匀分布
- * - 计数器：实现简单，窗口边界可能出现突刺
+ * v2.0 修复：
+ *  - 此前是"先 get 判断、再 incr、再 set"的三步非原子操作，高并发下必然超发；
+ *    现改为"原子 incr → 超限回滚 decr"，单次往返即可完成判定；
+ *  - 此前每次 set 都会重置 TTL，导致窗口被无限延长；现仅在窗口首次创建时设置 TTL；
+ *  - getWaitTime() 返回当前窗口真实剩余秒数。
  */
-class Counter implements RateLimiterInterface
+class Counter extends AbstractRateLimiter
 {
     private readonly string $counterPrefix;
 
     public function __construct(
-        private readonly StoreInterface $store,
+        StoreInterface $store,
         private readonly int $limit,
         private readonly int $windowSeconds = 60,
-        private readonly string $prefix = 'counter:'
+        string $prefix = 'counter:'
     ) {
-        $this->counterPrefix = $this->prefix;
+        if ($windowSeconds <= 0) {
+            throw InvalidConfigurationException::positiveRequired('windowSeconds', $windowSeconds);
+        }
+
+        parent::__construct($store, $limit, $windowSeconds, $prefix);
+
+        $this->counterPrefix = $prefix;
     }
 
-    /**
-     * 检查是否允许请求
-     *
-     * @param string $key 限流键
-     * @param int $tokens 请求的令牌数
-     * @return bool
-     */
+    public static function fromConfig(StoreInterface $store, LimiterConfig $config): self
+    {
+        return new self(
+            $store,
+            $config->capacity,
+            max(1, (int) round($config->refillRate)),
+            $config->prefix
+        );
+    }
+
+    #[\Override]
     public function allow(string $key, int $tokens = 1): bool
     {
-        $now = time();
-        $windowKey = $this->getWindowKey($key, $now);
+        $this->assertKey($key);
+        $this->assertTokens($tokens);
 
-        $count = (int) $this->store->get($windowKey);
+        if ($tokens === 0) {
+            return $this->getCount($key) < $this->limit;
+        }
 
-        if ($count + $tokens > $this->limit) {
+        if ($tokens > $this->limit) {
             return false;
         }
 
-        $this->store->incr($windowKey, $tokens);
-        $this->store->set($windowKey, (string) ((int) $this->store->get($windowKey)), $this->windowSeconds);
+        $windowKey = $this->getWindowKey($key, time());
+        $count = $this->store->incr($windowKey, $tokens, $this->windowSeconds);
+
+        if ($count > $this->limit) {
+            // 原子回滚，避免拒绝的请求也占用配额
+            $this->store->decr($windowKey, $tokens);
+
+            return false;
+        }
 
         return true;
     }
 
     /**
-     * 获取当前窗口的请求数
-     *
-     * @param string $key 限流键
-     * @return int
+     * 获取当前窗口已使用的请求数
      */
     public function getCount(string $key): int
     {
-        $now = time();
-        $windowKey = $this->getWindowKey($key, $now);
-        return (int) ($this->store->get($windowKey) ?? 0);
+        $this->assertKey($key);
+
+        return max(0, (int) ($this->store->get($this->getWindowKey($key, time())) ?? 0));
     }
 
-    /**
-     * 获取剩余请求数
-     *
-     * @param string $key 限流键
-     * @return float
-     */
+    #[\Override]
     public function getRemaining(string $key): float
     {
         return (float) max(0, $this->limit - $this->getCount($key));
     }
 
-    /**
-     * 获取等待时间
-     *
-     * @param string $key 限流键
-     * @return float
-     */
+    #[\Override]
     public function getWaitTime(string $key): float
     {
-        $remaining = $this->getRemaining($key);
-
-        if ($remaining > 0) {
+        if ($this->getRemaining($key) > 0) {
             return 0.0;
         }
 
         $now = time();
-        $windowKey = $this->getWindowKey($key, $now);
+        $ttl = $this->store->ttl($this->getWindowKey($key, $now));
 
-        $lastUpdate = $this->store->ttl($windowKey);
-
-        if ($lastUpdate > 0) {
-            return (float) $lastUpdate;
+        if ($ttl > 0) {
+            return (float) $ttl;
         }
 
-        return (float) $this->windowSeconds;
+        // 兜底：按窗口边界推算
+        return (float) ($this->windowSeconds - ($now % $this->windowSeconds));
     }
 
-    /**
-     * 重置限流器
-     *
-     * @param string $key 限流键
-     */
+    #[\Override]
     public function reset(string $key): void
     {
-        $now = time();
-        $windowKey = $this->getWindowKey($key, $now);
-        $this->store->delete($windowKey);
+        $this->assertKey($key);
+        $this->store->delete($this->getWindowKey($key, time()));
     }
 
-    /**
-     * 计算窗口键
-     *
-     * @param string $key 限流键
-     * @param int $timestamp 时间戳
-     * @return string
-     */
-    private function getWindowKey(string $key, int $timestamp): string
-    {
-        $window = (int) floor($timestamp / $this->windowSeconds);
-        return $this->counterPrefix . $key . ':' . $window;
-    }
-
-    /**
-     * 获取限制数
-     *
-     * @return int
-     */
     public function getLimit(): int
     {
         return $this->limit;
     }
 
-    /**
-     * 获取窗口大小（秒）
-     *
-     * @return int
-     */
     public function getWindowSeconds(): int
     {
         return $this->windowSeconds;
+    }
+
+    /**
+     * 当前窗口序号对应的存储键
+     */
+    private function getWindowKey(string $key, int $timestamp): string
+    {
+        return $this->counterPrefix . $key . ':' . intdiv($timestamp, $this->windowSeconds);
     }
 }

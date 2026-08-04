@@ -7,68 +7,37 @@ namespace Kode\Limiting\Distributed;
 use Kode\Limiting\Store\RedisStore;
 
 /**
- * 分布式 Fiber 限流器（跨机器）
+ * 分布式 Fiber 协程限流器（跨机器）
  *
- * 使用 Redis 协调多机器间的 Fiber 协程并发控制
+ * 使用 Redis 协调多机器间的协程并发上限。
  */
-class DistributedFiberLimiter
+class DistributedFiberLimiter extends AbstractDistributedSemaphore
 {
-    private RedisStore $store;
-    private int $maxFibers;
-    private string $prefix;
-
-    private const LUA_ACQUIRE = <<<'LUA'
-local key = KEYS[1]
-local active_key = KEYS[2]
-local max_count = tonumber(ARGV[1])
-local fiber_id = ARGV[2]
-local ttl = tonumber(ARGV[3])
-
-local active_count = tonumber(redis.call('GET', active_key) or '0')
-
-if active_count >= max_count then
-    return 0
-end
-
-redis.call('INCR', active_key)
-redis.call('EXPIRE', active_key, ttl)
-redis.call('HSET', key, fiber_id, '1')
-redis.call('EXPIRE', key, ttl)
-
-return 1
-LUA;
-
-    private const LUA_RELEASE = <<<'LUA'
-local key = KEYS[1]
-local active_key = KEYS[2]
-local fiber_id = ARGV[1]
-
-redis.call('HDEL', key, fiber_id)
-redis.call('DECR', active_key)
-
-return 1
-LUA;
-
-    private static bool $fiberSupported;
-
     public function __construct(
         RedisStore $store,
         int $maxFibers,
         string $prefix = 'fiber:limiter:'
     ) {
-        $this->store = $store;
-        $this->maxFibers = $maxFibers;
-        $this->prefix = $prefix;
-        self::$fiberSupported ??= class_exists(\Fiber::class);
+        parent::__construct($store, $maxFibers, $prefix);
     }
 
-    public static function isSupported(): bool
-    {
-        return self::$fiberSupported;
+    public static function create(
+        string $host = '127.0.0.1',
+        int $port = 6379,
+        int $maxFibers = 100,
+        ?string $password = null,
+        int $database = 0,
+        string $prefix = 'fiber:limiter:'
+    ): self {
+        return new self(
+            RedisStore::create($host, $port, 'kode:limiting:', $password, $database),
+            $maxFibers,
+            $prefix
+        );
     }
 
     /**
-     * 创建分布式 Fiber 限流器（单机模式）
+     * v1.x 遗留命名，保留为 create() 的别名
      */
     public static function createStore(
         string $host = '127.0.0.1',
@@ -78,35 +47,21 @@ LUA;
         int $database = 0,
         string $prefix = 'fiber:limiter:'
     ): self {
-        return new self(
-            RedisStore::create($host, $port, $prefix, $password, $database),
-            $maxFibers,
-            $prefix
-        );
+        return self::create($host, $port, $maxFibers, $password, $database, $prefix);
     }
 
-    /**
-     * 尝试获取 Fiber 许可（非阻塞）
-     */
+    public static function isSupported(): bool
+    {
+        return class_exists(\Fiber::class);
+    }
+
     public function tryAcquire(string $fiberId, int $ttl = 3600): bool
     {
-        $key = $this->prefix . 'fibers:' . $fiberId;
-        $activeKey = $this->prefix . 'active';
-
-        $result = $this->store->eval(
-            self::LUA_ACQUIRE,
-            [$key, $activeKey],
-            2,
-            $this->maxFibers,
-            $fiberId,
-            $ttl
-        );
-
-        return $result === 1 || $result === true;
+        return $this->doTryAcquire($fiberId, $ttl);
     }
 
     /**
-     * 阻塞等待获取许可
+     * 等待槽位；在协程内让出执行权，在主线程内退化为轮询等待
      */
     public function acquire(string $fiberId, float $timeout = 30.0, int $ttl = 3600): bool
     {
@@ -117,10 +72,10 @@ LUA;
                 return false;
             }
 
-            if (self::$fiberSupported) {
+            if (self::isSupported() && \Fiber::getCurrent() !== null) {
                 \Fiber::suspend();
             } else {
-                usleep(10000);
+                usleep(10_000);
             }
         }
 
@@ -128,19 +83,17 @@ LUA;
     }
 
     /**
-     * 创建并启动 Fiber
+     * 在并发额度内创建并启动 Fiber
+     *
+     * @return \Fiber<mixed, mixed, mixed, mixed>|null
      */
     public function start(string $fiberId, callable $callback, int $ttl = 3600): ?\Fiber
     {
-        if (!self::$fiberSupported) {
+        if (!self::isSupported() || !$this->tryAcquire($fiberId, $ttl)) {
             return null;
         }
 
-        if (!$this->tryAcquire($fiberId, $ttl)) {
-            return null;
-        }
-
-        $fiber = new \Fiber(function () use ($fiberId, $callback) {
+        $fiber = new \Fiber(function () use ($fiberId, $callback): void {
             try {
                 $callback();
             } finally {
@@ -149,43 +102,17 @@ LUA;
         });
 
         $fiber->start();
+
         return $fiber;
     }
 
-    /**
-     * 释放 Fiber
-     */
     public function release(string $fiberId): void
     {
-        $key = $this->prefix . 'fibers:' . $fiberId;
-        $activeKey = $this->prefix . 'active';
-
-        $this->store->eval(self::LUA_RELEASE, [$key, $activeKey], 2, $fiberId);
+        $this->doRelease($fiberId);
     }
 
-    /**
-     * 获取当前活跃 Fiber 数
-     */
-    public function getActiveCount(): int
-    {
-        $activeKey = $this->prefix . 'active';
-        $count = $this->store->get($activeKey);
-        return (int) ($count ?? 0);
-    }
-
-    /**
-     * 获取最大 Fiber 数
-     */
     public function getMaxFibers(): int
     {
-        return $this->maxFibers;
-    }
-
-    /**
-     * 检查健康状态
-     */
-    public function isHealthy(): bool
-    {
-        return $this->store->isHealthy();
+        return $this->maxSlots;
     }
 }

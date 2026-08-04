@@ -30,7 +30,9 @@ class LimiterMiddlewareTest extends TestCase
         $info = $this->middleware->getLimiterInfo('user:2');
         $this->assertArrayHasKey('allowed', $info);
         $this->assertArrayHasKey('remaining', $info);
-        $this->assertArrayHasKey('wait_time', $info);
+        // v2.0: getLimiterInfo 改为只读 check() 输出，键为 retry_after（非旧版的 wait_time）
+        $this->assertArrayHasKey('retry_after', $info);
+        $this->assertArrayHasKey('limit', $info);
     }
 
     public function testGetName(): void
@@ -41,5 +43,24 @@ class LimiterMiddlewareTest extends TestCase
     public function testGetCapacity(): void
     {
         $this->assertEquals(100, $this->middleware->getCapacity());
+    }
+
+    public function testHandleInvokesNextWhenAllowed(): void
+    {
+        $called = false;
+        $result = $this->middleware->handle('user:3', function () use (&$called) {
+            $called = true;
+
+            return 'ok';
+        });
+        $this->assertTrue($called);
+        $this->assertEquals('ok', $result);
+    }
+
+    public function testGetHeaders(): void
+    {
+        $headers = $this->middleware->getHeaders('user:4');
+        $this->assertArrayHasKey('X-RateLimit-Limit', $headers);
+        $this->assertArrayHasKey('X-RateLimit-Remaining', $headers);
     }
 }

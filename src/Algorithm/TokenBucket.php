@@ -5,27 +5,37 @@ declare(strict_types=1);
 namespace Kode\Limiting\Algorithm;
 
 use Kode\Limiting\DTO\LimiterConfig;
-use Kode\Limiting\DTO\LimiterResult;
+use Kode\Limiting\Exception\InvalidConfigurationException;
 use Kode\Limiting\Store\StoreInterface;
 
 /**
  * 令牌桶限流算法
  *
- * 支持突发流量，按固定速率补充令牌
- * 使用 PHP 8.2 readonly 属性优化性能
+ * 以固定速率补充令牌，桶内有存量即可放行，因此天然支持突发流量。
+ *
+ * v2.0 修复：
+ *  - 首次请求时若 tokens > capacity 会被错误放行且写入负数令牌，现直接拒绝；
+ *  - 状态 JSON 损坏时不再触发 undefined index，按空桶重建；
+ *  - getWaitTime() 按实际缺口计算，而非固定按 1 个令牌估算。
  */
-class TokenBucket implements RateLimiterInterface
+class TokenBucket extends AbstractRateLimiter
 {
     private readonly string $bucketPrefix;
 
     public function __construct(
-        private readonly StoreInterface $store,
-        private readonly int $capacity,
+        StoreInterface $store,
+        int $capacity,
         private readonly float $refillRate,
-        private readonly int $ttl = 3600,
-        private readonly string $prefix = 'bucket:'
+        int $ttl = 3600,
+        string $prefix = 'bucket:'
     ) {
-        $this->bucketPrefix = $this->prefix . 'bucket:';
+        parent::__construct($store, $capacity, $ttl, $prefix);
+
+        if ($refillRate <= 0) {
+            throw InvalidConfigurationException::positiveRequired('refillRate', $refillRate);
+        }
+
+        $this->bucketPrefix = $prefix . 'bucket:';
     }
 
     public static function fromConfig(StoreInterface $store, LimiterConfig $config): self
@@ -39,84 +49,76 @@ class TokenBucket implements RateLimiterInterface
         );
     }
 
+    #[\Override]
     public function allow(string $key, int $tokens = 1): bool
     {
+        $this->assertKey($key);
+        $this->assertTokens($tokens);
+
+        if ($tokens > $this->capacity) {
+            return false;
+        }
+
         $now = microtime(true);
         $bucketKey = $this->bucketPrefix . $key;
+        $state = $this->readState($bucketKey);
 
-        $data = $this->store->get($bucketKey);
+        $available = $state === null
+            ? (float) $this->capacity
+            : $this->refill((float) ($state['tokens'] ?? 0), (float) ($state['last_update'] ?? $now), $now);
 
-        if ($data === null) {
-            $this->store->set($bucketKey, json_encode([
-                'tokens' => $this->capacity - $tokens,
-                'last_update' => $now,
-            ]), $this->ttl);
-            return true;
+        if ($available + 1e-9 < $tokens) {
+            $this->writeState($bucketKey, ['tokens' => $available, 'last_update' => $now]);
+
+            return false;
         }
 
-        $bucket = json_decode($data, true);
-        $elapsed = $now - $bucket['last_update'];
-        $refillAmount = $elapsed * $this->refillRate;
+        $this->writeState($bucketKey, ['tokens' => $available - $tokens, 'last_update' => $now]);
 
-        $bucket['tokens'] = min($this->capacity, $bucket['tokens'] + $refillAmount);
-        $bucket['last_update'] = $now;
-
-        if ($bucket['tokens'] >= $tokens) {
-            $bucket['tokens'] -= $tokens;
-            $this->store->set($bucketKey, json_encode($bucket), $this->ttl);
-            return true;
-        }
-
-        $this->store->set($bucketKey, json_encode($bucket), $this->ttl);
-        return false;
+        return true;
     }
 
-    public function check(string $key, int $tokens = 1): LimiterResult
+    #[\Override]
+    public function getRemaining(string $key): float
+    {
+        $this->assertKey($key);
+
+        $state = $this->readState($this->bucketPrefix . $key);
+
+        if ($state === null) {
+            return (float) $this->capacity;
+        }
+
+        $now = microtime(true);
+
+        return $this->refill((float) ($state['tokens'] ?? 0), (float) ($state['last_update'] ?? $now), $now);
+    }
+
+    #[\Override]
+    public function getWaitTime(string $key): float
+    {
+        return $this->getWaitTimeFor($key, 1);
+    }
+
+    /**
+     * 获取攒够指定令牌数所需的等待秒数
+     */
+    public function getWaitTimeFor(string $key, int $tokens): float
     {
         $remaining = $this->getRemaining($key);
 
         if ($remaining >= $tokens) {
-            return LimiterResult::allowed($remaining - $tokens);
-        }
-
-        return LimiterResult::denied($this->getWaitTime($key));
-    }
-
-    public function getRemaining(string $key): float
-    {
-        $now = microtime(true);
-        $bucketKey = $this->bucketPrefix . $key;
-
-        $data = $this->store->get($bucketKey);
-
-        if ($data === null) {
-            return (float) $this->capacity;
-        }
-
-        $bucket = json_decode($data, true);
-        $elapsed = $now - $bucket['last_update'];
-        $refillAmount = $elapsed * $this->refillRate;
-
-        return max(0, min($this->capacity, $bucket['tokens'] + $refillAmount));
-    }
-
-    public function getWaitTime(string $key): float
-    {
-        $remaining = $this->getRemaining($key);
-        if ($remaining >= 1) {
             return 0.0;
         }
-        return (1.0 - $remaining) / $this->refillRate;
+
+        return ($tokens - $remaining) / $this->refillRate;
     }
 
+    #[\Override]
     public function reset(string $key): void
     {
+        $this->assertKey($key);
         $this->store->delete($this->bucketPrefix . $key);
-    }
-
-    public function getCapacity(): int
-    {
-        return $this->capacity;
     }
 
     public function getRefillRate(): float
@@ -124,8 +126,13 @@ class TokenBucket implements RateLimiterInterface
         return $this->refillRate;
     }
 
-    public function getTtl(): int
+    /**
+     * 按流逝时间补充令牌，上限为桶容量
+     */
+    private function refill(float $tokens, float $lastUpdate, float $now): float
     {
-        return $this->ttl;
+        $elapsed = max(0.0, $now - $lastUpdate);
+
+        return max(0.0, min((float) $this->capacity, $tokens + $elapsed * $this->refillRate));
     }
 }

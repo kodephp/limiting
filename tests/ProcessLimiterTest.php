@@ -9,34 +9,43 @@ use PHPUnit\Framework\TestCase;
 
 class ProcessLimiterTest extends TestCase
 {
-    private ProcessLimiter $limiter;
-
     protected function setUp(): void
     {
-        $this->limiter = ProcessLimiter::getInstance(10, 10, 1.0);
+        ProcessLimiter::flushInstances();
     }
 
     public function testTryAcquire(): void
     {
-        $this->assertTrue($this->limiter->tryAcquire('process:1'));
+        $limiter = ProcessLimiter::getInstance(4, 'p:');
+        $this->assertTrue($limiter->tryAcquire('process:1'));
+    }
+
+    public function testMaxProcessesEnforced(): void
+    {
+        $limiter = ProcessLimiter::getInstance(2, 'q:');
+        $this->assertTrue($limiter->tryAcquire('process:1'));
+        $this->assertTrue($limiter->tryAcquire('process:2'));
+        $this->assertFalse($limiter->tryAcquire('process:3'));
+        $this->assertEquals(2, $limiter->getMaxProcesses());
     }
 
     public function testRelease(): void
     {
-        $this->limiter->tryAcquire('process:2');
-        $this->limiter->release('process:2');
-        $this->assertTrue($this->limiter->tryAcquire('process:2'));
-    }
-
-    public function testGetMaxProcesses(): void
-    {
-        $this->assertEquals(10, $this->limiter->getMaxProcesses());
+        $limiter = ProcessLimiter::getInstance(4, 'r:');
+        $limiter->tryAcquire('process:2');
+        $this->assertTrue($limiter->isRunning('process:2'));
+        $limiter->release('process:2');
+        $this->assertFalse($limiter->isRunning('process:2'));
+        $this->assertTrue($limiter->tryAcquire('process:2'));
     }
 
     public function testGetInstance(): void
     {
-        $instance1 = ProcessLimiter::getInstance();
-        $instance2 = ProcessLimiter::getInstance();
-        $this->assertSame($instance1, $instance2);
+        $i1 = ProcessLimiter::getInstance(4, 's:');
+        $i2 = ProcessLimiter::getInstance(4, 's:');
+        $this->assertSame($i1, $i2);
+        // 不同前缀 => 不同共享实例
+        $i3 = ProcessLimiter::getInstance(4, 's2:');
+        $this->assertNotSame($i1, $i3);
     }
 }

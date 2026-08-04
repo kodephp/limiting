@@ -4,89 +4,92 @@ declare(strict_types=1);
 
 namespace Kode\Limiting\Concurrency;
 
-use Kode\Limiting\Algorithm\TokenBucket;
 use Kode\Limiting\Store\MemoryStore;
+use Kode\Limiting\Store\StoreInterface;
 
 /**
  * 并发任务限流器
  *
- * 控制同时执行的最大任务数
- * 使用 PHP 8.2 readonly 属性优化性能
+ * 控制同时执行的最大任务数。
+ *
+ * v2.0 重写：底层从"每个 taskId 一个令牌桶"（并发上限形同虚设）
+ * 改为共享槽位的计数信号量，maxConcurrency 现在是真实生效的硬上限。
  */
 class TaskLimiter
 {
-    private readonly TokenBucket $bucket;
+    private readonly Semaphore $semaphore;
 
     public function __construct(
         private readonly int $maxConcurrency,
-        private readonly int $capacity,
-        private readonly float $refillRate,
-        private readonly MemoryStore $store,
-        private readonly string $prefix = 'task:'
+        StoreInterface $store = new MemoryStore(),
+        private readonly string $prefix = 'task:',
+        int $slotTtl = 3600
     ) {
-        $this->bucket = new TokenBucket(
-            $this->store,
-            $this->capacity,
-            $this->refillRate,
-            3600,
-            $this->prefix
-        );
+        $this->semaphore = new Semaphore($maxConcurrency, $store, $prefix, $slotTtl);
     }
 
     public static function create(
-        int $maxConcurrency,
-        int $capacity,
-        float $refillRate = 1.0,
-        ?MemoryStore $store = null
+        int $maxConcurrency = 10,
+        ?StoreInterface $store = null,
+        string $prefix = 'task:'
     ): self {
-        return new self($maxConcurrency, $capacity, $refillRate, $store ?? new MemoryStore());
+        return new self($maxConcurrency, $store ?? new MemoryStore(), $prefix);
     }
 
     public function tryAcquire(string $taskId): bool
     {
-        $key = $this->prefix . 'task:' . $taskId;
-        return $this->bucket->allow($key, 1);
+        return $this->semaphore->tryAcquire($taskId);
     }
 
     public function acquire(string $taskId, float $timeout = 30.0): bool
     {
-        $start = microtime(true);
-
-        while (!$this->tryAcquire($taskId)) {
-            if (microtime(true) - $start >= $timeout) {
-                return false;
-            }
-            usleep(10000);
-        }
-
-        return true;
+        return $this->semaphore->acquire($taskId, $timeout);
     }
 
-    public function run(string $taskId, callable $callback): mixed
+    /**
+     * 在并发额度内执行任务，结束后自动释放
+     *
+     * @template T
+     * @param callable(): T $callback
+     * @return T
+     */
+    public function run(string $taskId, callable $callback, float $timeout = 30.0): mixed
     {
-        if (!$this->acquire($taskId)) {
-            throw new \RuntimeException("获取任务许可超时: {$taskId}");
-        }
-
-        try {
-            return $callback();
-        } finally {
-            $this->release($taskId);
-        }
+        return $this->semaphore->run($taskId, $callback, $timeout);
     }
 
     public function release(string $taskId): void
     {
-        $this->bucket->reset($this->prefix . 'task:' . $taskId);
+        $this->semaphore->release($taskId);
+    }
+
+    public function isRunning(string $taskId): bool
+    {
+        return $this->semaphore->isHeldBy($taskId);
     }
 
     public function getActiveCount(): int
     {
-        return (int) ($this->store->get($this->prefix . 'active') ?? 0);
+        return $this->semaphore->getActiveCount();
+    }
+
+    public function getAvailable(): int
+    {
+        return $this->semaphore->getAvailable();
     }
 
     public function getMaxConcurrency(): int
     {
         return $this->maxConcurrency;
+    }
+
+    public function getPrefix(): string
+    {
+        return $this->prefix;
+    }
+
+    public function reset(): void
+    {
+        $this->semaphore->reset();
     }
 }

@@ -4,50 +4,44 @@ declare(strict_types=1);
 
 namespace Kode\Limiting\Store;
 
+use Kode\Limiting\Exception\StoreException;
+use Kode\Limiting\Exception\UnsupportedDriverException;
+
 /**
- * PDO 存储实现
+ * PDO 数据库存储实现（分布式）
  *
- * 使用数据库进行分布式存储
- * 支持 MySQL、PostgreSQL、SQLite 等
+ * 支持 MySQL / MariaDB、PostgreSQL、SQLite。
+ *
+ * v2.0 修复：
+ *  - set() 此前固定使用 SQLite 专有的 "INSERT OR REPLACE"，在 MySQL /
+ *    PostgreSQL 下必然抛语法错误；现按驱动生成对应 UPSERT 语句。
+ *  - incr() 改为事务 + 行锁，避免并发下丢失更新。
  */
 class PdoStore implements StoreInterface
 {
     private readonly string $prefix;
+    private readonly string $driver;
 
-    /**
-     * 构造函数
-     *
-     * @param \PDO $pdo PDO 客户端实例
-     * @param string $table 表名
-     * @param string $prefix 键前缀
-     * @throws \RuntimeException 当 PDO 扩展未安装时
-     */
     public function __construct(
         private readonly \PDO $pdo,
         private readonly string $table = 'limiting',
         string $prefix = 'kode:limiting:'
     ) {
         if (!extension_loaded('pdo')) {
-            throw new \RuntimeException(
-                'PDO 扩展未安装，请先启用 PDO 扩展或参见 https://www.php.net/manual/zh/pdo.installation.php'
+            throw UnsupportedDriverException::extensionMissing(
+                'PDO',
+                '在 php.ini 中启用 extension=pdo',
+                'https://www.php.net/manual/zh/pdo.installation.php'
             );
         }
+
+        $this->pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
+        $this->driver = (string) $this->pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
         $this->prefix = $prefix;
+
         $this->initTable();
     }
 
-    /**
-     * 创建 MySQL PDO 存储实例
-     *
-     * @param string $host 数据库地址
-     * @param int $port 端口
-     * @param string $database 数据库名
-     * @param string $username 用户名
-     * @param string $password 密码
-     * @param string $table 表名
-     * @return self
-     * @throws \RuntimeException 当 PDO 扩展未安装时
-     */
     public static function createMysql(
         string $host = '127.0.0.1',
         int $port = 3306,
@@ -56,59 +50,20 @@ class PdoStore implements StoreInterface
         string $password = '',
         string $table = 'limiting'
     ): self {
-        if (!extension_loaded('pdo_mysql')) {
-            throw new \RuntimeException(
-                'PDO MySQL 扩展未安装，请先执行：pecl install pdo_mysql 或参见 https://www.php.net/manual/zh/ref.pdo-mysql.php'
-            );
-        }
+        self::assertDriver('pdo_mysql', 'PDO MySQL', 'https://www.php.net/manual/zh/ref.pdo-mysql.php');
 
         $dsn = "mysql:host={$host};port={$port};dbname={$database};charset=utf8mb4";
-        $pdo = new \PDO($dsn, $username, $password, [
-            \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-        ]);
 
-        return new self($pdo, $table);
+        return new self(self::connect($dsn, $username, $password), $table);
     }
 
-    /**
-     * 创建 SQLite PDO 存储实例
-     *
-     * @param string $path 数据库文件路径
-     * @param string $table 表名
-     * @return self
-     * @throws \RuntimeException 当 PDO 扩展未安装时
-     */
-    public static function createSqlite(
-        string $path = ':memory:',
-        string $table = 'limiting'
-    ): self {
-        if (!extension_loaded('pdo_sqlite')) {
-            throw new \RuntimeException(
-                'PDO SQLite 扩展未安装，请先启用 pdo_sqlite 扩展或参见 https://www.php.net/manual/zh/ref.pdo-sqlite.php'
-            );
-        }
+    public static function createSqlite(string $path = ':memory:', string $table = 'limiting'): self
+    {
+        self::assertDriver('pdo_sqlite', 'PDO SQLite', 'https://www.php.net/manual/zh/ref.pdo-sqlite.php');
 
-        $dsn = "sqlite:{$path}";
-        $pdo = new \PDO($dsn, null, null, [
-            \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-        ]);
-
-        return new self($pdo, $table);
+        return new self(self::connect("sqlite:{$path}", null, null), $table);
     }
 
-    /**
-     * 创建 PostgreSQL PDO 存储实例
-     *
-     * @param string $host 数据库地址
-     * @param int $port 端口
-     * @param string $database 数据库名
-     * @param string $username 用户名
-     * @param string $password 密码
-     * @param string $table 表名
-     * @return self
-     * @throws \RuntimeException 当 PDO 扩展未安装时
-     */
     public static function createPostgres(
         string $host = '127.0.0.1',
         int $port = 5432,
@@ -117,159 +72,237 @@ class PdoStore implements StoreInterface
         string $password = '',
         string $table = 'limiting'
     ): self {
-        if (!extension_loaded('pdo_pgsql')) {
-            throw new \RuntimeException(
-                'PDO PostgreSQL 扩展未安装，请先执行：pecl install pdo_pgsql 或参见 https://www.php.net/manual/zh/ref.pdo-pgsql.php'
-            );
-        }
+        self::assertDriver('pdo_pgsql', 'PDO PostgreSQL', 'https://www.php.net/manual/zh/ref.pdo-pgsql.php');
 
         $dsn = "pgsql:host={$host};port={$port};dbname={$database}";
-        $pdo = new \PDO($dsn, $username, $password, [
-            \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
-            \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
-        ]);
 
-        return new self($pdo, $table);
+        return new self(self::connect($dsn, $username, $password), $table);
+    }
+
+    private static function assertDriver(string $extension, string $label, string $docUrl): void
+    {
+        if (!extension_loaded($extension)) {
+            throw UnsupportedDriverException::extensionMissing($label, "启用 extension={$extension}", $docUrl);
+        }
+    }
+
+    private static function connect(string $dsn, ?string $username, ?string $password): \PDO
+    {
+        try {
+            return new \PDO($dsn, $username, $password, [
+                \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
+                \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+            ]);
+        } catch (\PDOException $e) {
+            throw StoreException::connectionFailed('PDO', $e->getMessage());
+        }
     }
 
     /**
-     * 初始化数据库表
+     * 初始化数据表
      */
     private function initTable(): void
     {
-        $driver = $this->pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
-
-        if ($driver === 'sqlite') {
-            $sql = "CREATE TABLE IF NOT EXISTS {$this->table} (
-                key_name VARCHAR(255) PRIMARY KEY,
+        $sql = match ($this->driver) {
+            'mysql' => "CREATE TABLE IF NOT EXISTS {$this->table} (
+                key_name VARCHAR(191) NOT NULL PRIMARY KEY,
                 value TEXT NOT NULL,
-                expires_at INTEGER NOT NULL
-            )";
-        } elseif ($driver === 'pgsql') {
-            $sql = "CREATE TABLE IF NOT EXISTS {$this->table} (
-                key_name VARCHAR(255) PRIMARY KEY,
+                expires_at BIGINT NOT NULL DEFAULT 0,
+                INDEX idx_{$this->table}_expires (expires_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+            default => "CREATE TABLE IF NOT EXISTS {$this->table} (
+                key_name VARCHAR(191) NOT NULL PRIMARY KEY,
                 value TEXT NOT NULL,
-                expires_at INTEGER NOT NULL
-            )";
-        } else {
-            $sql = "CREATE TABLE IF NOT EXISTS {$this->table} (
-                key_name VARCHAR(255) PRIMARY KEY,
-                value TEXT NOT NULL,
-                expires_at INT NOT NULL,
-                INDEX idx_expires_at (expires_at)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
-        }
+                expires_at BIGINT NOT NULL DEFAULT 0
+            )",
+        };
 
         $this->pdo->exec($sql);
+
+        if ($this->driver !== 'mysql') {
+            $this->pdo->exec(
+                "CREATE INDEX IF NOT EXISTS idx_{$this->table}_expires ON {$this->table} (expires_at)"
+            );
+        }
     }
 
-    /**
-     * 生成带前缀的键名
-     */
     private function key(string $key): string
     {
         return $this->prefix . $key;
     }
 
     /**
-     * 获取值
+     * 按驱动生成 UPSERT 语句
      */
+    private function upsertSql(): string
+    {
+        return match ($this->driver) {
+            'mysql' => "INSERT INTO {$this->table} (key_name, value, expires_at) VALUES (:k, :v, :e)
+                        ON DUPLICATE KEY UPDATE value = VALUES(value), expires_at = VALUES(expires_at)",
+            default => "INSERT INTO {$this->table} (key_name, value, expires_at) VALUES (:k, :v, :e)
+                        ON CONFLICT (key_name) DO UPDATE SET value = excluded.value, expires_at = excluded.expires_at",
+        };
+    }
+
+    #[\Override]
     public function get(string $key): ?string
     {
         $stmt = $this->pdo->prepare(
-            "SELECT value, expires_at FROM {$this->table} WHERE key_name = ?"
+            "SELECT value, expires_at FROM {$this->table} WHERE key_name = :k"
         );
-        $stmt->execute([$this->key($key)]);
-        $row = $stmt->fetch();
+        $stmt->execute(['k' => $this->key($key)]);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
 
-        if (!$row) {
+        if ($row === false) {
             return null;
         }
 
-        if ((int) $row['expires_at'] > 0 && (int) $row['expires_at'] < time()) {
+        $expiresAt = (int) $row['expires_at'];
+
+        if ($expiresAt > 0 && $expiresAt <= time()) {
             $this->delete($key);
             return null;
         }
 
-        return $row['value'];
+        return (string) $row['value'];
     }
 
-    /**
-     * 设置值
-     */
+    #[\Override]
     public function set(string $key, string $value, int $ttl = 0): void
     {
-        $expiresAt = $ttl > 0 ? time() + $ttl : 0;
-
-        $stmt = $this->pdo->prepare(
-            "INSERT OR REPLACE INTO {$this->table} (key_name, value, expires_at) VALUES (?, ?, ?)"
-        );
-        $stmt->execute([$this->key($key), $value, $expiresAt]);
+        $stmt = $this->pdo->prepare($this->upsertSql());
+        $stmt->execute([
+            'k' => $this->key($key),
+            'v' => $value,
+            'e' => $ttl > 0 ? time() + $ttl : 0,
+        ]);
     }
 
-    /**
-     * 删除键
-     */
+    #[\Override]
     public function delete(string $key): void
     {
-        $stmt = $this->pdo->prepare(
-            "DELETE FROM {$this->table} WHERE key_name = ?"
-        );
-        $stmt->execute([$this->key($key)]);
+        $stmt = $this->pdo->prepare("DELETE FROM {$this->table} WHERE key_name = :k");
+        $stmt->execute(['k' => $this->key($key)]);
     }
 
-    /**
-     * 原子递增
-     */
-    public function incr(string $key, int $step = 1): int
+    #[\Override]
+    public function incr(string $key, int $step = 1, int $ttl = 0): int
     {
-        $current = $this->get($key);
-        $newValue = ((int) ($current ?? 0)) + $step;
-        $this->set($key, (string) $newValue);
-        return $newValue;
+        $ownTransaction = !$this->pdo->inTransaction();
+
+        if ($ownTransaction) {
+            $this->pdo->beginTransaction();
+        }
+
+        try {
+            $sql = "SELECT value, expires_at FROM {$this->table} WHERE key_name = :k";
+
+            if ($this->driver === 'mysql' || $this->driver === 'pgsql') {
+                $sql .= ' FOR UPDATE';
+            }
+
+            $stmt = $this->pdo->prepare($sql);
+            $stmt->execute(['k' => $this->key($key)]);
+            $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+
+            $expired = $row !== false
+                && (int) $row['expires_at'] > 0
+                && (int) $row['expires_at'] <= time();
+
+            $current = ($row === false || $expired) ? 0 : (int) $row['value'];
+            $newValue = $current + $step;
+
+            $expiresAt = match (true) {
+                $row !== false && !$expired => (int) $row['expires_at'],
+                $ttl > 0 => time() + $ttl,
+                default => 0,
+            };
+
+            $write = $this->pdo->prepare($this->upsertSql());
+            $write->execute([
+                'k' => $this->key($key),
+                'v' => (string) $newValue,
+                'e' => $expiresAt,
+            ]);
+
+            if ($ownTransaction) {
+                $this->pdo->commit();
+            }
+
+            return $newValue;
+        } catch (\Throwable $e) {
+            if ($ownTransaction && $this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+
+            throw StoreException::operationFailed('PDO', 'incr', $e);
+        }
     }
 
-    /**
-     * 获取键的剩余 TTL
-     */
+    #[\Override]
+    public function decr(string $key, int $step = 1): int
+    {
+        return $this->incr($key, -$step);
+    }
+
+    #[\Override]
     public function ttl(string $key): int
     {
-        $stmt = $this->pdo->prepare(
-            "SELECT expires_at FROM {$this->table} WHERE key_name = ?"
-        );
-        $stmt->execute([$this->key($key)]);
-        $row = $stmt->fetch();
+        $stmt = $this->pdo->prepare("SELECT expires_at FROM {$this->table} WHERE key_name = :k");
+        $stmt->execute(['k' => $this->key($key)]);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
 
-        if (!$row) {
-            return -1;
+        if ($row === false) {
+            return -2;
         }
 
         $expiresAt = (int) $row['expires_at'];
+
         if ($expiresAt <= 0) {
             return -1;
         }
 
         $remaining = $expiresAt - time();
+
         return $remaining > 0 ? $remaining : -2;
     }
 
+    #[\Override]
+    public function has(string $key): bool
+    {
+        return $this->get($key) !== null;
+    }
+
     /**
-     * 获取 PDO 客户端实例
+     * 清理已过期记录，返回删除行数
      */
+    public function purgeExpired(): int
+    {
+        $stmt = $this->pdo->prepare(
+            "DELETE FROM {$this->table} WHERE expires_at > 0 AND expires_at <= :now"
+        );
+        $stmt->execute(['now' => time()]);
+
+        return $stmt->rowCount();
+    }
+
     public function getClient(): \PDO
     {
         return $this->pdo;
     }
 
-    /**
-     * 健康检查
-     */
+    public function getDriver(): string
+    {
+        return $this->driver;
+    }
+
     public function isHealthy(): bool
     {
         try {
-            $this->pdo->query("SELECT 1");
+            $this->pdo->query('SELECT 1');
+
             return true;
-        } catch (\Exception $e) {
+        } catch (\Throwable) {
             return false;
         }
     }

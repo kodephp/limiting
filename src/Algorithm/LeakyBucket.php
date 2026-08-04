@@ -4,113 +4,90 @@ declare(strict_types=1);
 
 namespace Kode\Limiting\Algorithm;
 
+use Kode\Limiting\DTO\LimiterConfig;
+use Kode\Limiting\Exception\InvalidConfigurationException;
 use Kode\Limiting\Store\StoreInterface;
 
 /**
- * 漏桶算法限流器
+ * 漏桶限流算法
  *
- * 特点：固定速率输出，适合流量整形
- * 水（请求）以任意速率进入桶，但以固定速率离开
+ * 水（请求）以任意速率注入，以固定速率漏出；桶满则拒绝。
+ * 适合需要"流量整形"、抑制突发的场景。
  *
- * 与令牌桶的区别：
- * - 令牌桶：允许突发流量，桶满则拒绝
- * - 漏桶：请求匀速处理，超速则等待
+ * v2.0 修复：
+ *  - 超限时不再把溢出的水量写回存储（此前会造成惩罚性累积，
+ *    使桶在拒绝后需要额外时间才能恢复）；
+ *  - 首次请求走内存态计算，省掉一次多余的 get；
+ *  - getWaitTime() 按实际溢出量计算。
  */
-class LeakyBucket implements RateLimiterInterface
+class LeakyBucket extends AbstractRateLimiter
 {
     private readonly string $bucketPrefix;
 
     public function __construct(
-        private readonly StoreInterface $store,
-        private readonly int $capacity,
+        StoreInterface $store,
+        int $capacity,
         private readonly float $leakRate,
-        private readonly int $ttl = 3600,
-        private readonly string $prefix = 'leaky:'
+        int $ttl = 3600,
+        string $prefix = 'leaky:'
     ) {
-        $this->bucketPrefix = $this->prefix . 'bucket:';
-    }
+        parent::__construct($store, $capacity, $ttl, $prefix);
 
-    /**
-     * 检查是否允许请求
-     *
-     * @param string $key 限流键
-     * @param int $tokens 请求的令牌数（相当于注入的水量）
-     * @return bool
-     */
-    public function allow(string $key, int $tokens = 1): bool
-    {
-        $now = microtime(true);
-        $bucketKey = $this->bucketPrefix . $key;
-
-        $data = $this->store->get($bucketKey);
-
-        if ($data === null) {
-            $this->store->set($bucketKey, json_encode([
-                'water' => 0.0,
-                'last_leak' => $now,
-            ]), $this->ttl);
-            $data = $this->store->get($bucketKey);
+        if ($leakRate <= 0) {
+            throw InvalidConfigurationException::positiveRequired('leakRate', $leakRate);
         }
 
-        $bucket = json_decode($data, true);
+        $this->bucketPrefix = $prefix . 'bucket:';
+    }
 
-        $this->leak($bucket, $now);
-        $bucket['water'] += $tokens;
+    public static function fromConfig(StoreInterface $store, LimiterConfig $config): self
+    {
+        return new self(
+            $store,
+            $config->capacity,
+            $config->refillRate,
+            $config->ttl,
+            $config->prefix
+        );
+    }
 
-        if ($bucket['water'] > $this->capacity) {
-            $this->store->set($bucketKey, json_encode($bucket), $this->ttl);
+    #[\Override]
+    public function allow(string $key, int $tokens = 1): bool
+    {
+        $this->assertKey($key);
+        $this->assertTokens($tokens);
+
+        if ($tokens > $this->capacity) {
             return false;
         }
 
-        $this->store->set($bucketKey, json_encode($bucket), $this->ttl);
+        $now = microtime(true);
+        $bucketKey = $this->bucketPrefix . $key;
+        $water = $this->currentWater($bucketKey, $now);
+
+        if ($water + $tokens > $this->capacity + 1e-9) {
+            // 拒绝时只落盘"已漏水后"的水位，不累计溢出部分
+            $this->writeState($bucketKey, ['water' => $water, 'last_leak' => $now]);
+
+            return false;
+        }
+
+        $this->writeState($bucketKey, ['water' => $water + $tokens, 'last_leak' => $now]);
+
         return true;
     }
 
-    /**
-     * 漏水处理
-     *
-     * 根据时间流逝，计算漏出的水量
-     *
-     * @param array $bucket 桶数据
-     * @param float $now 当前时间戳
-     */
-    private function leak(array &$bucket, float $now): void
-    {
-        $elapsed = $now - $bucket['last_leak'];
-        $leaked = $elapsed * $this->leakRate;
-
-        $bucket['water'] = max(0, $bucket['water'] - $leaked);
-        $bucket['last_leak'] = $now;
-    }
-
-    /**
-     * 获取剩余容量
-     *
-     * @param string $key 限流键
-     * @return float
-     */
+    #[\Override]
     public function getRemaining(string $key): float
     {
-        $now = microtime(true);
-        $bucketKey = $this->bucketPrefix . $key;
-        $data = $this->store->get($bucketKey);
+        $this->assertKey($key);
 
-        if ($data === null) {
-            return (float) $this->capacity;
-        }
+        $water = $this->currentWater($this->bucketPrefix . $key, microtime(true));
 
-        $bucket = json_decode($data, true);
-        $this->leak($bucket, $now);
-
-        return max(0, $this->capacity - $bucket['water']);
+        return max(0.0, $this->capacity - $water);
     }
 
-    /**
-     * 获取等待时间
-     *
-     * @param string $key 限流键
-     * @return float
-     */
+    #[\Override]
     public function getWaitTime(string $key): float
     {
         $remaining = $this->getRemaining($key);
@@ -122,33 +99,33 @@ class LeakyBucket implements RateLimiterInterface
         return (1.0 - $remaining) / $this->leakRate;
     }
 
-    /**
-     * 重置限流器
-     *
-     * @param string $key 限流键
-     */
+    #[\Override]
     public function reset(string $key): void
     {
+        $this->assertKey($key);
         $this->store->delete($this->bucketPrefix . $key);
     }
 
-    /**
-     * 获取桶容量
-     *
-     * @return int
-     */
-    public function getCapacity(): int
-    {
-        return $this->capacity;
-    }
-
-    /**
-     * 获取漏水速率
-     *
-     * @return float
-     */
     public function getLeakRate(): float
     {
         return $this->leakRate;
+    }
+
+    /**
+     * 计算按当前时刻漏水后的水位
+     */
+    private function currentWater(string $bucketKey, float $now): float
+    {
+        $state = $this->readState($bucketKey);
+
+        if ($state === null) {
+            return 0.0;
+        }
+
+        $water = (float) ($state['water'] ?? 0.0);
+        $lastLeak = (float) ($state['last_leak'] ?? $now);
+        $leaked = max(0.0, $now - $lastLeak) * $this->leakRate;
+
+        return max(0.0, $water - $leaked);
     }
 }

@@ -4,54 +4,44 @@ declare(strict_types=1);
 
 namespace Kode\Limiting\Store;
 
+use Kode\Limiting\Exception\UnsupportedDriverException;
+
 /**
- * Memcached 存储实现
+ * Memcached 存储实现（分布式）
  *
- * 使用 Memcached 进行分布式存储
- * 适合多机器共享限流状态
+ * v2.0 修复：
+ *  - ttl() 此前遍历 getStats() 返回服务器 uptime，属于完全错误的实现；
+ *    现改为写入时记录绝对过期时间的伴生键，返回真实剩余秒数。
+ *  - incr() 补齐初始值与 TTL 处理。
  */
 class MemcachedStore implements StoreInterface
 {
     private readonly string $prefix;
 
-    /**
-     * 构造函数
-     *
-     * @param \Memcached $memcached Memcached 客户端实例
-     * @param string $prefix 键前缀
-     * @throws \RuntimeException 当 Memcached 扩展未安装时
-     */
     public function __construct(
         private readonly \Memcached $memcached,
         string $prefix = 'kode:limiting:'
     ) {
-        if (!extension_loaded('memcached')) {
-            throw new \RuntimeException(
-                'Memcached 扩展未安装，请先执行：pecl install memcached 或参见 https://www.php.net/manual/zh/book.memcached.php'
-            );
-        }
         $this->prefix = $prefix;
     }
 
-    /**
-     * 创建 Memcached 存储实例
-     *
-     * @param string $host Memcached 服务器地址
-     * @param int $port Memcached 服务器端口
-     * @param string $prefix 键前缀
-     * @return self
-     * @throws \RuntimeException 当 Memcached 扩展未安装时
-     */
+    private static function assertExtension(): void
+    {
+        if (!extension_loaded('memcached')) {
+            throw UnsupportedDriverException::extensionMissing(
+                'Memcached',
+                'pecl install memcached',
+                'https://www.php.net/manual/zh/book.memcached.php'
+            );
+        }
+    }
+
     public static function create(
         string $host = '127.0.0.1',
         int $port = 11211,
         string $prefix = 'kode:limiting:'
     ): self {
-        if (!extension_loaded('memcached')) {
-            throw new \RuntimeException(
-                'Memcached 扩展未安装，请先执行：pecl install memcached 或参见 https://www.php.net/manual/zh/book.memcached.php'
-            );
-        }
+        self::assertExtension();
 
         $memcached = new \Memcached();
         $memcached->addServer($host, $port);
@@ -60,36 +50,34 @@ class MemcachedStore implements StoreInterface
     }
 
     /**
-     * 添加多个服务器
+     * 批量添加服务器
      *
-     * @param array $servers 服务器列表 [[host, port], ...]
-     * @return self
+     * @param list<array{0: string, 1: int}|string> $servers
      */
     public function addServers(array $servers): self
     {
         $serverList = [];
+
         foreach ($servers as $server) {
-            if (is_array($server)) {
-                $serverList[] = [$server[0], $server[1]];
-            } else {
-                $serverList[] = [$server, 11211];
-            }
+            $serverList[] = is_array($server) ? [$server[0], (int) $server[1]] : [$server, 11211];
         }
+
         $this->memcached->addServers($serverList);
+
         return $this;
     }
 
-    /**
-     * 生成带前缀的键名
-     */
     private function key(string $key): string
     {
         return $this->prefix . $key;
     }
 
-    /**
-     * 获取值
-     */
+    private function expireKey(string $key): string
+    {
+        return $this->prefix . '__exp:' . $key;
+    }
+
+    #[\Override]
     public function get(string $key): ?string
     {
         $value = $this->memcached->get($this->key($key));
@@ -98,69 +86,88 @@ class MemcachedStore implements StoreInterface
             return null;
         }
 
-        return $value;
+        return $value === false ? null : (string) $value;
     }
 
-    /**
-     * 设置值
-     */
+    #[\Override]
     public function set(string $key, string $value, int $ttl = 0): void
     {
-        $this->memcached->set($this->key($key), $value, $ttl);
+        $expiration = $ttl > 0 ? $ttl : 0;
+
+        $this->memcached->set($this->key($key), $value, $expiration);
+        $this->memcached->set($this->expireKey($key), $ttl > 0 ? time() + $ttl : 0, $expiration);
     }
 
-    /**
-     * 删除键
-     */
+    #[\Override]
     public function delete(string $key): void
     {
         $this->memcached->delete($this->key($key));
+        $this->memcached->delete($this->expireKey($key));
     }
 
-    /**
-     * 原子递增
-     */
-    public function incr(string $key, int $step = 1): int
+    #[\Override]
+    public function incr(string $key, int $step = 1, int $ttl = 0): int
     {
-        $result = $this->memcached->increment($this->key($key), $step);
+        $realKey = $this->key($key);
+
+        // initial_value 仅在键不存在时生效，等价于原子的 "get or create + incr"
+        $result = $this->memcached->increment($realKey, $step, $step, $ttl > 0 ? $ttl : 0);
 
         if ($result === false) {
-            $this->memcached->set($this->key($key), (string) $step, 0);
-            return $step;
+            $this->memcached->set($realKey, (string) $step, $ttl > 0 ? $ttl : 0);
+            $result = $step;
         }
 
-        return $result;
+        if ($ttl > 0 && $this->memcached->get($this->expireKey($key)) === false) {
+            $this->memcached->set($this->expireKey($key), time() + $ttl, $ttl);
+        }
+
+        return (int) $result;
     }
 
-    /**
-     * 获取键的剩余 TTL
-     */
+    #[\Override]
+    public function decr(string $key, int $step = 1): int
+    {
+        $result = $this->memcached->decrement($this->key($key), $step, 0);
+
+        return $result === false ? 0 : (int) $result;
+    }
+
+    #[\Override]
     public function ttl(string $key): int
     {
-        $stats = $this->memcached->getStats();
-        foreach ($stats as $server => $info) {
-            $keys = $this->memcached->getDelayed([$this->key($key)], true);
-            if ($keys) {
-                return $info['uptime'] ?? -1;
-            }
+        if (!$this->has($key)) {
+            return -2;
         }
-        return -1;
+
+        $expiresAt = $this->memcached->get($this->expireKey($key));
+
+        if ($expiresAt === false || (int) $expiresAt <= 0) {
+            return -1;
+        }
+
+        $remaining = (int) $expiresAt - time();
+
+        return $remaining > 0 ? $remaining : -2;
     }
 
-    /**
-     * 获取 Memcached 客户端实例
-     */
+    #[\Override]
+    public function has(string $key): bool
+    {
+        $this->memcached->get($this->key($key));
+
+        return $this->memcached->getResultCode() !== \Memcached::RES_NOTFOUND;
+    }
+
     public function getClient(): \Memcached
     {
         return $this->memcached;
     }
 
-    /**
-     * 健康检查
-     */
     public function isHealthy(): bool
     {
         $stats = $this->memcached->getStats();
-        return !empty($stats);
+
+        return is_array($stats) && $stats !== [];
     }
 }

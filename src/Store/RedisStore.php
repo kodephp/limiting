@@ -4,67 +4,73 @@ declare(strict_types=1);
 
 namespace Kode\Limiting\Store;
 
+use Kode\Limiting\Exception\StoreException;
+use Kode\Limiting\Exception\UnsupportedDriverException;
+
 /**
- * Redis 存储实现（分布式使用）
+ * Redis 存储实现（分布式）
  *
- * 支持单机、Sentinel、Cluster 模式
- * 使用 PHP 8.2 readonly 属性优化性能
+ * 支持单机、Sentinel、Cluster 三种模式。
+ *
+ * v2.0 关键修复：
+ *  - evalScript() 明确区分 KEYS 与 ARGV，此前分布式限流器传入的
+ *    参数全部被丢弃，导致 Lua 脚本内 ARGV 为空、限流完全失效。
+ *  - 内置 EVALSHA 脚本缓存，减少每次调用的脚本传输开销。
  */
 class RedisStore implements StoreInterface
 {
     private readonly string $prefix;
 
+    /** @var array<string, string> Lua 脚本 SHA1 缓存 */
+    private array $scriptCache = [];
+
     /**
-     * 构造函数
-     *
      * @param \Redis|\RedisCluster $redis Redis 客户端实例
-     * @param string $prefix 键前缀
-     * @throws \RuntimeException 当 Redis 扩展未安装时
      */
     public function __construct(
         private readonly \Redis|\RedisCluster $redis,
         string $prefix = 'kode:limiting:'
     ) {
+        $this->prefix = $prefix;
+    }
+
+    private static function assertExtension(): void
+    {
         if (!extension_loaded('redis')) {
-            throw new \RuntimeException(
-                'Redis 扩展未安装，请先执行：pecl install redis 或参见 https://www.php.net/manual/zh/book.redis.php'
+            throw UnsupportedDriverException::extensionMissing(
+                'Redis',
+                'pecl install redis',
+                'https://www.php.net/manual/zh/book.redis.php'
             );
         }
-        $this->prefix = $prefix;
     }
 
     /**
      * 创建单机 Redis 存储实例
-     *
-     * @param string $host Redis 服务器地址
-     * @param int $port Redis 服务器端口
-     * @param string $prefix 键前缀
-     * @param string|null $password 密码
-     * @param int $database 数据库编号
-     * @return self
-     * @throws \RuntimeException 当 Redis 扩展未安装时
      */
     public static function create(
         string $host = '127.0.0.1',
         int $port = 6379,
         string $prefix = 'kode:limiting:',
         ?string $password = null,
-        int $database = 0
+        int $database = 0,
+        float $timeout = 1.0
     ): self {
-        if (!extension_loaded('redis')) {
-            throw new \RuntimeException(
-                'Redis 扩展未安装，请先执行：pecl install redis 或参见 https://www.php.net/manual/zh/book.redis.php'
-            );
-        }
+        self::assertExtension();
 
         $redis = new \Redis();
-        $redis->connect($host, $port, 0.0);
 
-        if ($password !== null) {
-            $redis->auth($password);
+        try {
+            $redis->connect($host, $port, $timeout);
+
+            if ($password !== null && $password !== '') {
+                $redis->auth($password);
+            }
+
+            $redis->select($database);
+        } catch (\Throwable $e) {
+            throw StoreException::connectionFailed('Redis', $e->getMessage());
         }
-
-        $redis->select($database);
 
         return new self($redis, $prefix);
     }
@@ -72,110 +78,87 @@ class RedisStore implements StoreInterface
     /**
      * 创建 Redis Sentinel 高可用存储实例
      *
-     * @param array $sentinels Sentinel 服务器列表
-     * @param string $masterName 主节点名称
-     * @param string|null $password 密码
-     * @param int $database 数据库编号
-     * @param string $prefix 键前缀
-     * @return self
-     * @throws \RuntimeException 当 Redis 扩展未安装或无法连接时
+     * @param list<string> $sentinels Sentinel 地址列表，形如 127.0.0.1:26379
      */
     public static function createSentinel(
         array $sentinels,
         string $masterName,
         ?string $password = null,
         int $database = 0,
-        string $prefix = 'kode:limiting:'
+        string $prefix = 'kode:limiting:',
+        float $timeout = 1.0
     ): self {
-        if (!extension_loaded('redis')) {
-            throw new \RuntimeException(
-                'Redis 扩展未安装，请先执行：pecl install redis 或参见 https://www.php.net/manual/zh/book.redis.php'
-            );
-        }
-
-        $redis = new \Redis();
+        self::assertExtension();
 
         foreach ($sentinels as $sentinel) {
             try {
-                [$host, $port] = explode(':', $sentinel);
-                $redis->connect($host, (int) $port, 1.0);
+                [$host, $port] = array_pad(explode(':', $sentinel, 2), 2, '26379');
 
-                $master = $redis->eval(
-                    "return redis.call('SENTINEL', 'GET-MASTER-ADDR-BY-NAME', ARGV[1])",
-                    [$masterName],
-                    1
-                );
+                $probe = new \Redis();
+                $probe->connect($host, (int) $port, $timeout);
 
-                if ($master) {
-                    $redis->connect($master[0], (int) $master[1], 1.0);
+                /** @var array{0: string, 1: string}|false $master */
+                $master = $probe->rawCommand('SENTINEL', 'get-master-addr-by-name', $masterName);
+                $probe->close();
 
-                    if ($password !== null) {
-                        $redis->auth($password);
-                    }
-                    $redis->select($database);
-
-                    return new self($redis, $prefix);
+                if (!is_array($master) || count($master) < 2) {
+                    continue;
                 }
-            } catch (\Exception $e) {
+
+                $redis = new \Redis();
+                $redis->connect($master[0], (int) $master[1], $timeout);
+
+                if ($password !== null && $password !== '') {
+                    $redis->auth($password);
+                }
+
+                $redis->select($database);
+
+                return new self($redis, $prefix);
+            } catch (\Throwable) {
                 continue;
             }
         }
 
-        throw new \RuntimeException('无法连接到 Redis Sentinel 主节点');
+        throw StoreException::connectionFailed('Redis Sentinel', "无法定位主节点 {$masterName}");
     }
 
     /**
      * 创建 Redis Cluster 存储实例
      *
-     * @param array $nodes 集群节点列表
-     * @param string|null $password 密码
-     * @param string $prefix 键前缀
-     * @return self
-     * @throws \RuntimeException 当 Redis 扩展未安装时
+     * @param list<string> $nodes
      */
     public static function createCluster(
         array $nodes,
         ?string $password = null,
-        string $prefix = 'kode:limiting:'
+        string $prefix = 'kode:limiting:',
+        float $timeout = 1.0
     ): self {
-        if (!extension_loaded('redis')) {
-            throw new \RuntimeException(
-                'Redis 扩展未安装，请先执行：pecl install redis 或参见 https://www.php.net/manual/zh/book.redis.php'
-            );
-        }
+        self::assertExtension();
 
-        $redis = new \RedisCluster(
-            null,
-            $nodes,
-            1.0,
-            1.0,
-            false,
-            $password
-        );
+        try {
+            $redis = new \RedisCluster(null, $nodes, $timeout, $timeout, false, $password);
+        } catch (\Throwable $e) {
+            throw StoreException::connectionFailed('Redis Cluster', $e->getMessage());
+        }
 
         return new self($redis, $prefix);
     }
 
-    /**
-     * 生成带前缀的键名
-     */
     private function key(string $key): string
     {
         return $this->prefix . $key;
     }
 
-    /**
-     * 获取值
-     */
+    #[\Override]
     public function get(string $key): ?string
     {
         $value = $this->redis->get($this->key($key));
-        return $value === false ? null : $value;
+
+        return $value === false ? null : (string) $value;
     }
 
-    /**
-     * 设置值
-     */
+    #[\Override]
     public function set(string $key, string $value, int $ttl = 0): void
     {
         if ($ttl > 0) {
@@ -185,44 +168,112 @@ class RedisStore implements StoreInterface
         }
     }
 
-    /**
-     * 删除键
-     */
+    #[\Override]
     public function delete(string $key): void
     {
         $this->redis->del($this->key($key));
     }
 
-    /**
-     * 原子递增
-     */
-    public function incr(string $key, int $step = 1): int
+    #[\Override]
+    public function incr(string $key, int $step = 1, int $ttl = 0): int
     {
-        return $this->redis->incrBy($this->key($key), $step);
+        $realKey = $this->key($key);
+        $value = (int) $this->redis->incrBy($realKey, $step);
+
+        // 仅首次创建时设置过期，避免每次递增都续期造成窗口漂移
+        if ($ttl > 0 && $value === $step) {
+            $this->redis->expire($realKey, $ttl);
+        }
+
+        return $value;
     }
 
-    /**
-     * 获取键的 TTL
-     */
+    #[\Override]
+    public function decr(string $key, int $step = 1): int
+    {
+        return (int) $this->redis->decrBy($this->key($key), $step);
+    }
+
+    #[\Override]
     public function ttl(string $key): int
     {
-        return $this->redis->ttl($this->key($key));
+        return (int) $this->redis->ttl($this->key($key));
+    }
+
+    #[\Override]
+    public function has(string $key): bool
+    {
+        return (bool) $this->redis->exists($this->key($key));
     }
 
     /**
      * 执行 Lua 脚本（原子操作）
+     *
+     * @param list<string> $keys Lua 中的 KEYS（会自动补前缀）
+     * @param list<int|float|string> $args Lua 中的 ARGV
      */
-    public function eval(string $script, array $keys = [], int $numKeys = 0): mixed
+    public function evalScript(string $script, array $keys = [], array $args = []): mixed
     {
-        return $this->redis->eval($script, $keys, $numKeys);
+        $prefixedKeys = array_map(fn (string $k): string => $this->key($k), $keys);
+        $payload = [...$prefixedKeys, ...array_map(static fn ($v): string => (string) $v, $args)];
+        $numKeys = count($prefixedKeys);
+
+        $sha = $this->scriptCache[$script] ??= $this->loadScript($script);
+
+        if ($sha !== '') {
+            $result = $this->redis->evalSha($sha, $payload, $numKeys);
+
+            if ($result !== false || $this->lastErrorIsNoScript()) {
+                if ($result !== false) {
+                    return $result;
+                }
+
+                unset($this->scriptCache[$script]);
+            }
+        }
+
+        return $this->redis->eval($script, $payload, $numKeys);
     }
 
     /**
-     * 获取 Redis 客户端实例
+     * 向后兼容的别名
+     *
+     * @param list<string> $keys
+     * @param list<int|float|string> $args
      */
+    public function eval(string $script, array $keys = [], array $args = []): mixed
+    {
+        return $this->evalScript($script, $keys, $args);
+    }
+
+    private function loadScript(string $script): string
+    {
+        try {
+            $sha = $this->redis instanceof \RedisCluster
+                ? $this->redis->script($this->redis->_masters()[0] ?? 'default', 'load', $script)
+                : $this->redis->script('load', $script);
+
+            return is_string($sha) ? $sha : '';
+        } catch (\Throwable) {
+            return '';
+        }
+    }
+
+    private function lastErrorIsNoScript(): bool
+    {
+        $error = $this->redis->getLastError();
+
+        return is_string($error) && str_contains($error, 'NOSCRIPT');
+    }
+
     public function getClient(): \Redis|\RedisCluster
     {
         return $this->redis;
+    }
+
+    public function getPrefix(): string
+    {
+        return $this->prefix;
     }
 
     /**
@@ -231,8 +282,12 @@ class RedisStore implements StoreInterface
     public function isHealthy(): bool
     {
         try {
-            return $this->redis->ping() === '+PONG' || $this->redis->ping() === true;
-        } catch (\Exception $e) {
+            $pong = $this->redis instanceof \RedisCluster
+                ? $this->redis->ping($this->redis->_masters()[0] ?? 'default')
+                : $this->redis->ping();
+
+            return $pong === true || $pong === '+PONG' || $pong === 'PONG';
+        } catch (\Throwable) {
             return false;
         }
     }

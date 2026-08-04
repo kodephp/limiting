@@ -5,29 +5,40 @@ declare(strict_types=1);
 namespace Kode\Limiting\Algorithm;
 
 use Kode\Limiting\DTO\LimiterConfig;
-use Kode\Limiting\DTO\LimiterResult;
+use Kode\Limiting\Exception\InvalidConfigurationException;
 use Kode\Limiting\Store\StoreInterface;
 
 /**
- * 滑动窗口限流算法
+ * 滑动窗口限流算法（滑动日志实现）
  *
- * 基于时间窗口的精确限流，适合需要平滑限流场景
- * 使用 PHP 8.2 readonly 属性优化性能
+ * 记录窗口内每次请求的时间戳，判定时剔除过期条目后精确统计，
+ * 不存在固定窗口的边界突刺问题。
+ *
+ * v2.0 重写：
+ *  旧实现虽名为"滑动窗口"，实际是一个永不衰减的计数器 —— 它把时间戳写进了
+ *  一堆孤立的键却从不读取，计数键的 TTL 又被 (int)($windowSize * 2) 截断，
+ *  当窗口小于 0.5 秒时 TTL 直接变成 0（永不过期），额度耗尽后再也无法恢复。
+ *  现改为单键滑动日志，读写一次即可完成精确判定。
  */
-class SlidingWindow implements RateLimiterInterface
+class SlidingWindow extends AbstractRateLimiter
 {
     private readonly string $windowPrefix;
-    private readonly string $countPrefix;
 
     public function __construct(
-        private readonly StoreInterface $store,
-        private readonly int $capacity,
+        StoreInterface $store,
+        int $capacity,
         private readonly float $windowSize = 1.0,
-        private readonly int $ttl = 3600,
-        private readonly string $prefix = 'sw:'
+        ?int $ttl = null,
+        string $prefix = 'sw:'
     ) {
-        $this->windowPrefix = $this->prefix . 'window:';
-        $this->countPrefix = $this->prefix . 'count:';
+        if ($windowSize <= 0) {
+            throw InvalidConfigurationException::positiveRequired('windowSize', $windowSize);
+        }
+
+        // TTL 至少覆盖两个窗口，且不小于 1 秒，修复窗口 < 0.5s 时 TTL 归零的缺陷
+        parent::__construct($store, $capacity, $ttl ?? max(1, (int) ceil($windowSize * 2)), $prefix);
+
+        $this->windowPrefix = $prefix . 'window:';
     }
 
     public static function fromConfig(StoreInterface $store, LimiterConfig $config): self
@@ -36,76 +47,111 @@ class SlidingWindow implements RateLimiterInterface
             $store,
             $config->capacity,
             $config->refillRate,
-            $config->ttl,
+            max($config->ttl, (int) ceil($config->refillRate * 2)),
             $config->prefix
         );
     }
 
+    #[\Override]
     public function allow(string $key, int $tokens = 1): bool
     {
-        $now = microtime(true);
-        $windowKey = $this->windowPrefix . $key;
-        $countKey = $this->countPrefix . $key;
+        $this->assertKey($key);
+        $this->assertTokens($tokens);
 
-        $currentCount = (int) ($this->store->get($countKey) ?? 0);
-
-        if ($currentCount + $tokens > $this->capacity) {
+        if ($tokens > $this->capacity) {
             return false;
         }
 
-        for ($i = 0; $i < $tokens; $i++) {
-            $timestamp = (int) ($now * 1000) + $i;
-            $this->store->set(
-                $windowKey . ':' . $timestamp,
-                (string) $now,
-                (int) ($this->windowSize * 2)
-            );
+        $now = microtime(true);
+        $windowKey = $this->windowPrefix . $key;
+        $entries = $this->activeEntries($windowKey, $now);
+        $used = $this->sum($entries);
+
+        if ($used + $tokens > $this->capacity) {
+            $this->writeState($windowKey, ['entries' => $entries]);
+
+            return false;
         }
 
-        $this->store->set($countKey, (string) ($currentCount + $tokens), (int) ($this->windowSize * 2));
+        if ($tokens > 0) {
+            $entries[] = [$now, $tokens];
+        }
+
+        $this->writeState($windowKey, ['entries' => $entries]);
 
         return true;
     }
 
-    public function check(string $key, int $tokens = 1): LimiterResult
-    {
-        $remaining = $this->getRemaining($key);
-
-        if ($remaining >= $tokens) {
-            return LimiterResult::allowed($remaining - $tokens);
-        }
-
-        return LimiterResult::denied($this->getWaitTime($key));
-    }
-
+    #[\Override]
     public function getRemaining(string $key): float
     {
-        $countKey = $this->countPrefix . $key;
-        $count = (int) ($this->store->get($countKey) ?? 0);
-        return (float) max(0, $this->capacity - $count);
+        $this->assertKey($key);
+
+        $entries = $this->activeEntries($this->windowPrefix . $key, microtime(true));
+
+        return (float) max(0, $this->capacity - $this->sum($entries));
     }
 
+    #[\Override]
     public function getWaitTime(string $key): float
     {
-        if ($this->getRemaining($key) > 0) {
+        $now = microtime(true);
+        $entries = $this->activeEntries($this->windowPrefix . $key, $now);
+
+        if ($this->sum($entries) < $this->capacity) {
             return 0.0;
         }
-        return $this->windowSize;
+
+        // 最早的一条记录滑出窗口后即可释放额度
+        $oldest = $entries[0][0] ?? $now;
+
+        return max(0.0, ($oldest + $this->windowSize) - $now);
     }
 
+    #[\Override]
     public function reset(string $key): void
     {
+        $this->assertKey($key);
         $this->store->delete($this->windowPrefix . $key);
-        $this->store->delete($this->countPrefix . $key);
-    }
-
-    public function getCapacity(): int
-    {
-        return $this->capacity;
     }
 
     public function getWindowSize(): float
     {
         return $this->windowSize;
+    }
+
+    /**
+     * 当前窗口内的请求条目
+     *
+     * @return list<array{0: float, 1: int}>
+     */
+    private function activeEntries(string $windowKey, float $now): array
+    {
+        $state = $this->readState($windowKey);
+        $entries = is_array($state['entries'] ?? null) ? $state['entries'] : [];
+        $boundary = $now - $this->windowSize;
+        $active = [];
+
+        foreach ($entries as $entry) {
+            if (!is_array($entry) || count($entry) < 2) {
+                continue;
+            }
+
+            $timestamp = (float) $entry[0];
+
+            if ($timestamp > $boundary) {
+                $active[] = [$timestamp, (int) $entry[1]];
+            }
+        }
+
+        return $active;
+    }
+
+    /**
+     * @param list<array{0: float, 1: int}> $entries
+     */
+    private function sum(array $entries): int
+    {
+        return array_sum(array_column($entries, 1));
     }
 }

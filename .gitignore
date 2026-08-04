@@ -26,3 +26,7 @@ Thumbs.db
 
 # Trae
 .trae/
+
+# Local only (per project policy: do NOT push to repo)
+.workbuddy/
+CHANGELOG.md
