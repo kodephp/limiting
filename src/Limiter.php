@@ -15,6 +15,8 @@ use Kode\Limiting\DTO\LimiterResult;
 use Kode\Limiting\Enum\LimiterType;
 use Kode\Limiting\Enum\RedisMode;
 use Kode\Limiting\Enum\StoreType;
+use Kode\Limiting\EventHandler\LimiterEventHandler;
+use Kode\Limiting\EventHandler\NullLimiterEventHandler;
 use Kode\Limiting\Exception\InvalidConfigurationException;
 use Kode\Limiting\Exception\RateLimitExceededException;
 use Kode\Limiting\Middleware\LimiterMiddleware;
@@ -23,6 +25,7 @@ use Kode\Limiting\Store\MemcachedStore;
 use Kode\Limiting\Store\MemoryStore;
 use Kode\Limiting\Store\PdoStore;
 use Kode\Limiting\Store\RedisStore;
+use Kode\Limiting\Store\DegradationAwareInterface;
 use Kode\Limiting\Store\StoreInterface;
 
 /**
@@ -57,6 +60,7 @@ class Limiter implements RateLimiterInterface
     private readonly StoreInterface $store;
     private readonly LimiterConfig $config;
     private ?RateLimiterInterface $limiter = null;
+    private ?LimiterEventHandler $eventHandler = null;
 
     /**
      * @param StoreInterface|array<string, mixed>|null $store
@@ -66,7 +70,8 @@ class Limiter implements RateLimiterInterface
         private readonly StoreType $storeType = StoreType::MEMORY,
         private readonly LimiterType $limiterType = LimiterType::TOKEN_BUCKET,
         StoreInterface|array|null $store = null,
-        LimiterConfig|array|null $config = null
+        LimiterConfig|array|null $config = null,
+        ?LimiterEventHandler $eventHandler = null
     ) {
         $this->store = match (true) {
             $store instanceof StoreInterface => $store,
@@ -79,6 +84,8 @@ class Limiter implements RateLimiterInterface
             is_array($config) => LimiterConfig::fromArray($config),
             default => new LimiterConfig(10, 1.0),
         };
+
+        $this->eventHandler = $eventHandler;
     }
 
     // ---------------------------------------------------------------------
@@ -88,7 +95,8 @@ class Limiter implements RateLimiterInterface
     /**
      * 通用工厂：按类型创建
      *
-     * @param LimiterConfig|array<string, mixed>|null $config
+     * @param LimiterConfig|array<string, mixed>|null   $config
+     * @param StoreInterface|string|array<string, mixed>|null $store
      */
     public static function create(
         LimiterType $type = LimiterType::TOKEN_BUCKET,
@@ -110,6 +118,8 @@ class Limiter implements RateLimiterInterface
 
     /**
      * 令牌桶：允许突发，按固定速率补充
+     *
+     * @param StoreInterface|string|array<string, mixed>|null $store
      */
     public static function tokenBucket(
         int $capacity = 10,
@@ -121,6 +131,8 @@ class Limiter implements RateLimiterInterface
 
     /**
      * 滑动窗口（精确日志）
+     *
+     * @param StoreInterface|string|array<string, mixed>|null $store
      */
     public static function slidingWindow(
         int $capacity = 10,
@@ -132,6 +144,8 @@ class Limiter implements RateLimiterInterface
 
     /**
      * 滑动窗口计数器（加权近似，内存占用恒定）
+     *
+     * @param StoreInterface|string|array<string, mixed>|null $store
      */
     public static function slidingWindowCounter(
         int $capacity = 100,
@@ -147,6 +161,8 @@ class Limiter implements RateLimiterInterface
 
     /**
      * 漏桶：固定速率漏出，抑制突发
+     *
+     * @param StoreInterface|string|array<string, mixed>|null $store
      */
     public static function leakyBucket(
         int $capacity = 10,
@@ -158,6 +174,8 @@ class Limiter implements RateLimiterInterface
 
     /**
      * 固定窗口计数器
+     *
+     * @param StoreInterface|string|array<string, mixed>|null $store
      */
     public static function counter(
         int $maxRequests = 100,
@@ -313,32 +331,40 @@ class Limiter implements RateLimiterInterface
 
     public function withCapacity(int $capacity): self
     {
-        return new self($this->storeType, $this->limiterType, $this->store, $this->config->withCapacity($capacity));
+        return new self($this->storeType, $this->limiterType, $this->store, $this->config->withCapacity($capacity), $this->eventHandler);
     }
 
     public function withRate(float $rate): self
     {
-        return new self($this->storeType, $this->limiterType, $this->store, $this->config->withRefillRate($rate));
+        return new self($this->storeType, $this->limiterType, $this->store, $this->config->withRefillRate($rate), $this->eventHandler);
     }
 
     public function withTtl(int $ttl): self
     {
-        return new self($this->storeType, $this->limiterType, $this->store, $this->config->withTtl($ttl));
+        return new self($this->storeType, $this->limiterType, $this->store, $this->config->withTtl($ttl), $this->eventHandler);
     }
 
     public function withPrefix(string $prefix): self
     {
-        return new self($this->storeType, $this->limiterType, $this->store, $this->config->withPrefix($prefix));
+        return new self($this->storeType, $this->limiterType, $this->store, $this->config->withPrefix($prefix), $this->eventHandler);
     }
 
     public function withStore(StoreInterface $store): self
     {
-        return new self(self::detectStoreType($store), $this->limiterType, $store, $this->config);
+        return new self(self::detectStoreType($store), $this->limiterType, $store, $this->config, $this->eventHandler);
     }
 
     public function withType(LimiterType $type): self
     {
-        return new self($this->storeType, $type, $this->store, $this->config);
+        return new self($this->storeType, $type, $this->store, $this->config, $this->eventHandler);
+    }
+
+    /**
+     * 绑定事件回调（返回新实例，保持不可变）
+     */
+    public function withEventHandler(LimiterEventHandler $eventHandler): self
+    {
+        return new self($this->storeType, $this->limiterType, $this->store, $this->config, $eventHandler);
     }
 
     // ---------------------------------------------------------------------
@@ -362,13 +388,31 @@ class Limiter implements RateLimiterInterface
     #[\Override]
     public function check(string $key, int $tokens = 1): LimiterResult
     {
-        return $this->build()->check($key, $tokens);
+        try {
+            $result = $this->attachDegradation($this->build()->check($key, $tokens));
+            $this->eventHandler()->onResult($key, $result);
+
+            return $result;
+        } catch (\Throwable $e) {
+            $this->eventHandler()->onError($key, $e);
+
+            throw $e;
+        }
     }
 
     #[\Override]
     public function consume(string $key, int $tokens = 1): LimiterResult
     {
-        return $this->build()->consume($key, $tokens);
+        try {
+            $result = $this->attachDegradation($this->build()->consume($key, $tokens));
+            $this->eventHandler()->onResult($key, $result);
+
+            return $result;
+        } catch (\Throwable $e) {
+            $this->eventHandler()->onError($key, $e);
+
+            throw $e;
+        }
     }
 
     /**
@@ -436,7 +480,27 @@ class Limiter implements RateLimiterInterface
      */
     public function toMiddleware(string $name = 'default'): LimiterMiddleware
     {
-        return new LimiterMiddleware($this->build(), $name);
+        return new LimiterMiddleware($this->build(), $name, $this->eventHandler);
+    }
+
+    /**
+     * 若底层存储处于降级态，把"降级放行"标记到结果上并清除标记
+     */
+    private function attachDegradation(LimiterResult $result): LimiterResult
+    {
+        if ($this->store instanceof DegradationAwareInterface && $this->store->isDegraded()) {
+            $reason = $this->store->getDegradationReason();
+            $this->store->clearDegradation();
+
+            return $result->withDegraded(true, $reason);
+        }
+
+        return $result;
+    }
+
+    private function eventHandler(): LimiterEventHandler
+    {
+        return $this->eventHandler ?? new NullLimiterEventHandler();
     }
 
     // ---------------------------------------------------------------------
@@ -456,6 +520,16 @@ class Limiter implements RateLimiterInterface
             is_array($store) => self::storeFromArray($store),
             default => new MemoryStore(),
         };
+    }
+
+    /**
+     * 将配置解析为存储驱动实例（供 LimiterManager 等复用）
+     *
+     * @param StoreInterface|string|array<string, mixed>|null $store
+     */
+    public static function store(StoreInterface|string|array|null $store = null): StoreInterface
+    {
+        return self::resolveStore($store);
     }
 
     /**

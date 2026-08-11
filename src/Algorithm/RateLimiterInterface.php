@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Kode\Limiting\Algorithm;
 
 use Kode\Limiting\DTO\LimiterResult;
+use Kode\Limiting\Store\StoreInterface;
 
 /**
  * 限流算法统一接口
@@ -48,4 +49,9 @@ interface RateLimiterInterface
      * 获取总额度
      */
     public function getCapacity(): int;
+
+    /**
+     * 获取底层存储驱动（容灾降级检测所需）
+     */
+    public function getStore(): StoreInterface;
 }

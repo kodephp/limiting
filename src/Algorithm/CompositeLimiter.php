@@ -6,6 +6,8 @@ namespace Kode\Limiting\Algorithm;
 
 use Kode\Limiting\DTO\LimiterResult;
 use Kode\Limiting\Exception\InvalidConfigurationException;
+use Kode\Limiting\Store\MemoryStore;
+use Kode\Limiting\Store\StoreInterface;
 
 /**
  * 组合限流器（v2.0 新增）
@@ -149,6 +151,16 @@ class CompositeLimiter implements RateLimiterInterface
         $values = array_map(static fn (RateLimiterInterface $l): int => $l->getCapacity(), $this->limiters);
 
         return $values === [] ? 0 : min($values);
+    }
+
+    #[\Override]
+    public function getStore(): StoreInterface
+    {
+        foreach ($this->limiters as $limiter) {
+            return $limiter->getStore();
+        }
+
+        return new MemoryStore();
     }
 
     /**

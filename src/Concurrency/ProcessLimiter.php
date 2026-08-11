@@ -25,7 +25,7 @@ class ProcessLimiter
     public function __construct(
         private readonly int $maxProcesses,
         StoreInterface $store = new MemoryStore(),
-        private readonly string $prefix = 'process:',
+        string $prefix = 'process:',
         int $slotTtl = 3600
     ) {
         $this->semaphore = new Semaphore($maxProcesses, $store, $prefix, $slotTtl);

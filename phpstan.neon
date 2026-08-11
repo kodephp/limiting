@@ -1,0 +1,11 @@
+parameters:
+    level: 6
+    paths:
+        - src
+    excludePaths:
+        - src/Distributed/DistributedLimiter.php
+        - src/Distributed/AbstractDistributedSemaphore.php
+        - src/Distributed/DistributedTaskLimiter.php
+        - src/Distributed/DistributedProcessLimiter.php
+        - src/Distributed/DistributedFiberLimiter.php
+    treatPhpDocTypesAsCertain: false

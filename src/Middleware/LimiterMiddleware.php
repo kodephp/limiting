@@ -6,7 +6,10 @@ namespace Kode\Limiting\Middleware;
 
 use Kode\Limiting\Algorithm\RateLimiterInterface;
 use Kode\Limiting\DTO\LimiterResult;
+use Kode\Limiting\EventHandler\LimiterEventHandler;
+use Kode\Limiting\EventHandler\NullLimiterEventHandler;
 use Kode\Limiting\Exception\RateLimitExceededException;
+use Kode\Limiting\Store\DegradationAwareInterface;
 
 /**
  * 限流中间件
@@ -19,13 +22,23 @@ use Kode\Limiting\Exception\RateLimitExceededException;
 class LimiterMiddleware implements LimiterMiddlewareInterface
 {
     /**
-     * @param RateLimiterInterface $limiter 限流器实例
-     * @param string $name 中间件名称
+     * @param RateLimiterInterface   $limiter 限流器实例
+     * @param string                 $name    中间件名称
+     * @param LimiterEventHandler|null $eventHandler 事件回调（默认空操作）
      */
     public function __construct(
         private readonly RateLimiterInterface $limiter,
-        private readonly string $name = 'default'
+        private readonly string $name = 'default',
+        private readonly ?LimiterEventHandler $eventHandler = null
     ) {}
+
+    /**
+     * 绑定事件回调（返回新实例，保持不可变）
+     */
+    public function withEventHandler(LimiterEventHandler $eventHandler): self
+    {
+        return new self($this->limiter, $this->name, $eventHandler);
+    }
 
     #[\Override]
     public function isLimited(string $key, int $tokens = 1): bool
@@ -36,13 +49,22 @@ class LimiterMiddleware implements LimiterMiddlewareInterface
     #[\Override]
     public function consume(string $key, int $tokens = 1): LimiterResult
     {
-        return $this->limiter->consume($key, $tokens);
+        try {
+            $result = $this->enrich($this->limiter->consume($key, $tokens));
+            $this->handler()->onResult($key, $result);
+
+            return $result;
+        } catch (\Throwable $e) {
+            $this->handler()->onError($key, $e);
+
+            throw $e;
+        }
     }
 
     #[\Override]
     public function peek(string $key, int $tokens = 1): LimiterResult
     {
-        return $this->limiter->check($key, $tokens);
+        return $this->enrich($this->limiter->check($key, $tokens));
     }
 
     /**
@@ -100,5 +122,27 @@ class LimiterMiddleware implements LimiterMiddlewareInterface
     public function getLimiter(): RateLimiterInterface
     {
         return $this->limiter;
+    }
+
+    /**
+     * 若底层存储处于降级态，把"降级放行"标记到结果上并清除标记
+     */
+    private function enrich(LimiterResult $result): LimiterResult
+    {
+        $store = $this->limiter->getStore();
+
+        if ($store instanceof DegradationAwareInterface && $store->isDegraded()) {
+            $reason = $store->getDegradationReason();
+            $store->clearDegradation();
+
+            return $result->withDegraded(true, $reason);
+        }
+
+        return $result;
+    }
+
+    private function handler(): LimiterEventHandler
+    {
+        return $this->eventHandler ?? new NullLimiterEventHandler();
     }
 }

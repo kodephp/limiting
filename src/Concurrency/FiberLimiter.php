@@ -22,7 +22,7 @@ class FiberLimiter
     public function __construct(
         private readonly int $maxFibers,
         StoreInterface $store = new MemoryStore(),
-        private readonly string $prefix = 'fiber:',
+        string $prefix = 'fiber:',
         int $slotTtl = 3600
     ) {
         $this->semaphore = new Semaphore($maxFibers, $store, $prefix, $slotTtl);

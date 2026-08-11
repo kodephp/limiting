@@ -11,6 +11,10 @@
 - **分布式原子性**：Redis Lua 脚本保证「读取→补充→扣减→写回」原子执行，支持单机 / Sentinel / Cluster。
 - **声明式注解**：`#[RateLimit]` 标注在控制器上，由框架中间件反射读取。
 - **结构化结果**：`LimiterResult` 携带剩余额度、重试等待、429 响应头，可直接接入各类框架。
+- **配置驱动注册表**：`LimiterManager::fromConfig()` 一份数组批量注册命名限流器，按名取用。
+- **容灾降级**：`ResilientStore` 装饰任意存储，Redis / PDO 宕机时按策略兜底（默认 fail-open 放行并标记降级），业务不被限流器拖垮。
+- **事件回调**：`LimiterEventHandler` 在每次决策后（`onResult`）与异常时（`onError`）回调，方便接入日志 / 指标 / 告警。
+- **质量门禁**：内置 PHPStan（level 6）静态分析，`composer analyze` 一键检查。
 - **PHP 8.3+**：使用 `#[\Override]`、typed class constants、`json_validate()` 等新特性。
 
 ## 系统要求
@@ -66,7 +70,7 @@ Limiter::semaphore(10); // 计数信号量
 $middleware = Limiter::middleware(LimiterType::TOKEN_BUCKET, 100, 10.0);
 ```
 
-`Limiter` 实例方法：`allow()` / `check()`（返回 `LimiterResult`）/ `consume()` / `consumeOrFail()`（超限抛 `RateLimitExceededException`）/ `getRemaining()` / `getWaitTime()` / `reset()` / `getCapacity()`；流式配置 `withCapacity()` / `withRate()` / `withTtl()` / `withPrefix()` / `withStore()` / `withType()`（均返回新实例，保持不可变）。
+`Limiter` 实例方法：`allow()` / `check()`（返回 `LimiterResult`）/ `consume()` / `consumeOrFail()`（超限抛 `RateLimitExceededException`）/ `getRemaining()` / `getWaitTime()` / `reset()` / `getCapacity()`；流式配置 `withCapacity()` / `withRate()` / `withTtl()` / `withPrefix()` / `withStore()` / `withType()` / `withEventHandler()`（均返回新实例，保持不可变）。
 
 ## 快速开始
 
@@ -171,11 +175,82 @@ public function index(): Response { /* ... */ }
 $key = $attr->resolveKey(['user_id' => 42]); // => 'api:42'
 ```
 
+### 配置驱动注册表 `LimiterManager`
+
+用一份数组在框架引导阶段集中声明多条限流规则，运行期按业务名取用：
+
+```php
+use Kode\Limiting\LimiterManager;
+
+$manager = LimiterManager::fromConfig([
+    'stores' => [
+        'redis' => ['type' => 'redis', 'host' => '127.0.0.1'],
+    ],
+    'limiters' => [
+        'api'   => ['type' => 'token_bucket', 'capacity' => 100, 'refillRate' => 10, 'store' => 'redis'],
+        'login' => ['type' => 'counter', 'limit' => 5, 'window' => 60], // 未指定 store 则用内存
+    ],
+]);
+
+$manager->allow('api', 'user:123');                // 是否放行
+$result = $manager->consume('login', 'user:456');  // 消耗并取结果
+$manager->has('api');                              // 是否已注册
+$manager->names();                                 // ['api', 'login']
+```
+
+同名存储只构建一次并复用；`store` 字段可填存储名、存储配置数组或类型字符串。
+
+### 容灾降级与事件回调
+
+把任意存储包进 `ResilientStore`，底层（Redis / PDO 等）不可用时按策略兜底，业务不会被限流器拖垮：
+
+```php
+use Kode\Limiting\Enum\FailurePolicy;
+use Kode\Limiting\Store\RedisStore;
+use Kode\Limiting\Store\ResilientStore;
+use Kode\Limiting\Limiter;
+
+// 默认 fail-open：存储宕机时放行，并把结果标记为降级态
+$safe = new ResilientStore(RedisStore::create(), FailurePolicy::ALLOW);
+$result = Limiter::tokenBucket(100, 10.0, $safe)->consume('api:user:1');
+
+if ($result->degraded) {
+    // 降级放行：记录告警，但请求照常通过
+    error_log('限流器降级：' . $result->degradedReason);
+}
+
+// 严格模式：存储故障时原样抛出 StoreException
+$strict = new ResilientStore(RedisStore::create(), FailurePolicy::RETHROW);
+```
+
+降级结果会体现在 `LimiterResult`（额外携带 `degraded` / `degradedReason`）与响应头（`X-RateLimit-Degraded: 1`）上，便于观测。
+
+事件回调（`LimiterEventHandler`）则在每次决策后 / 异常时触发，方便接入日志、指标与告警：
+
+```php
+use Kode\Limiting\EventHandler\LimiterEventHandler;
+use Kode\Limiting\DTO\LimiterResult;
+
+$handler = new class implements LimiterEventHandler {
+    public function onResult(string $key, LimiterResult $result): void {
+        if ($result->degraded) { /* 上报降级 */ }
+    }
+    public function onError(string $key, \Throwable $error): void {
+        /* 上报异常 */
+    }
+};
+
+Limiter::tokenBucket(100, 10.0)->withEventHandler($handler)->consume('api:user:1');
+```
+
+`LimiterMiddleware` 同样支持 `withEventHandler()`，并在降级时把 `X-RateLimit-Degraded` 写入响应头。
+
 ## 架构
 
 ```
 src/
 ├── Limiter.php                      # 统一入口类
+├── LimiterManager.php               # 配置驱动注册表（fromConfig）
 ├── Attribute/RateLimit.php          # 声明式限流注解
 ├── DTO/
 │   ├── LimiterConfig.php            # 限流配置（不可变，构造即校验）
@@ -183,17 +258,23 @@ src/
 ├── Enum/
 │   ├── LimiterType.php              # 算法类型
 │   ├── StoreType.php                # 存储类型
-│   └── RedisMode.php               # Redis 模式
+│   ├── RedisMode.php               # Redis 模式
+│   └── FailurePolicy.php           # 存储故障兜底策略（ALLOW / RETHROW）
 ├── Exception/                       # 异常体系（接口 + 4 个实现）
+├── EventHandler/                    # 事件回调
+│   ├── LimiterEventHandler.php      # 决策 / 异常回调契约
+│   └── NullLimiterEventHandler.php  # 空实现（默认）
 ├── Store/                           # 存储层
 │   ├── StoreInterface.php           # 存储接口
+│   ├── DegradationAwareInterface.php# 降级感知标记接口
 │   ├── MemoryStore.php              # 内存存储
 │   ├── ApcuStore.php               # APCu 存储（单机多进程）
 │   ├── RedisStore.php              # Redis 存储（Sentinel/Cluster + Lua）
 │   ├── MemcachedStore.php          # Memcached 存储
 │   └── PdoStore.php               # PDO 存储（MySQL/SQLite/PostgreSQL）
+│   └── ResilientStore.php         # 容灾装饰器（fail-open / rethrow）
 ├── Algorithm/                       # 限流算法
-│   ├── RateLimiterInterface.php     # 统一接口（allow/check/consume/...）
+│   ├── RateLimiterInterface.php     # 统一接口（allow/check/consume/.../getStore）
 │   ├── AbstractRateLimiter.php      # 公共基类（校验/JSON 状态读写）
 │   ├── TokenBucket.php              # 令牌桶
 │   ├── SlidingWindow.php            # 滑动窗口（精确日志）
@@ -213,7 +294,7 @@ src/
 │   ├── ProcessLimiter.php
 │   └── FiberLimiter.php
 └── Middleware/
-    ├── LimiterMiddleware.php        # 限流中间件（handle 管道 + 响应头）
+    ├── LimiterMiddleware.php        # 限流中间件（handle 管道 + 响应头 + 降级/事件）
     └── LimiterMiddlewareInterface.php
 ```
 
@@ -254,10 +335,12 @@ $result->retryAfter;     // 建议重试等待秒数（放行时为 0）
 $result->limit;          // 总额度
 $result->resetAfter;     // 额度完全恢复所需秒数
 $result->timestamp;      // 结果产生时刻（毫秒）
+$result->degraded;       // 是否处于降级态（存储故障时兜底放行）
+$result->degradedReason; // 触发降级的原因（未降级时为 null）
 
 $result->isAllowed();
 $result->isDenied();
-$result->toHeaders();     // ['X-RateLimit-Limit'=>..., 'X-RateLimit-Remaining'=>..., 'Retry-After'=>...]（被拒时）
+$result->toHeaders();     // ['X-RateLimit-Limit'=>..., 'X-RateLimit-Remaining'=>..., 'Retry-After'=>...]（被拒时）；降级时附 'X-RateLimit-Degraded'=>'1'
 $result->toArray();
 json_encode($result);    // 等同 toArray()
 ```
@@ -280,12 +363,15 @@ $config = LimiterConfig::fromArray(['capacity' => 100, 'window' => 60]);
 
 ## 单元测试
 
-测试覆盖全部核心功能，共 **108 个测试用例、488 项断言**（PHPUnit 10.5/11，PHP 8.3），全绿。
+测试覆盖全部核心功能，共 **125 个测试用例、540 项断言**（PHPUnit 10.5/11，PHP 8.3），全绿。
 
 ```bash
 # 运行全部
 composer test            # 等价于 ./vendor/bin/phpunit --no-coverage
 ./vendor/bin/phpunit
+
+# 静态分析（PHPStan level 6）
+composer analyze
 
 # 详细输出
 ./vendor/bin/phpunit --testdox
@@ -293,7 +379,7 @@ composer test            # 等价于 ./vendor/bin/phpunit --no-coverage
 # 单文件
 ./vendor/bin/phpunit tests/CompositeLimiterTest.php
 
-# 覆盖率
+# 覆盖率（需 xdebug / pcov）
 ./vendor/bin/phpunit --coverage-html coverage
 ```
 
@@ -322,6 +408,7 @@ class MyStore implements StoreInterface
 composer install
 composer test        # 运行测试
 composer lint        # 语法检查（find src tests -name '*.php' -exec php -l）
+composer analyze     # PHPStan 静态分析
 ```
 
 ## 从 v1.x 升级到 v2.0
@@ -331,6 +418,18 @@ composer lint        # 语法检查（find src tests -name '*.php' -exec php -l�
 - **`LimiterResult`**：旧版 `$result->waitTime` 更名为 `retryAfter`；构造时不再二次赋值 readonly 属性。
 - **`RedisStore::eval()`**：已重命名为 `evalScript(string $script, array $keys, array $args)`，分布式限流现在真正生效（v1.x 的 ARGV 被丢弃从未生效）。
 - **`Limiter::leakyBucket()` / `counter()`**：现在分别返回真正的漏桶与计数器（v1.x 一律返回令牌桶）。
+
+## 从 v2.0 升级到 v2.1
+
+v2.1.0 为**向后兼容的增量版本**（纯新增能力，未改动既有 API 行为）：
+
+- **新增 `LimiterManager`**：`LimiterManager::fromConfig($array)` 批量注册命名限流器，按名取用。
+- **新增容灾降级**：`ResilientStore` 装饰任意存储，底层故障时默认 fail-open 放行并标记 `LimiterResult::$degraded`，响应头增加 `X-RateLimit-Degraded`。`FailurePolicy` 提供 `ALLOW` / `RETHROW` 两种策略。
+- **新增事件回调**：`LimiterEventHandler::onResult()` / `onError()`，可通过 `Limiter::withEventHandler()` 与 `LimiterMiddleware::withEventHandler()` 绑定。
+- **新增 `RateLimiterInterface::getStore()`**：所有算法均实现（组合限流器返回首个子规则的存储），供中间件统一检测降级。
+- **新增静态分析**：内置 PHPStan（level 6），`composer analyze` 检查。
+
+既有调用方式（v2.0）无需任何改动即可升级到 v2.1.0。
 
 ## 许可证
 

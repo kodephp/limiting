@@ -25,7 +25,7 @@ class Semaphore
     public function __construct(
         private readonly int $maxSlots,
         private readonly StoreInterface $store = new MemoryStore(),
-        private readonly string $prefix = 'sem:',
+        string $prefix = 'sem:',
         private readonly int $slotTtl = 3600
     ) {
         if ($maxSlots <= 0) {
