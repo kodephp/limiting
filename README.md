@@ -32,6 +32,8 @@ composer require kode/limiting
 
 ```php
 use Kode\Limiting\Limiter;
+use Kode\Limiting\Enum\LimiterType;
+use Kode\Limiting\Enum\RedisMode;
 
 // 令牌桶（默认，支持突发）
 Limiter::tokenBucket(100, 10.0)->allow('api:user:123');
@@ -48,11 +50,15 @@ Limiter::leakyBucket(100, 1.0)->allow('api:user:123');
 // 固定窗口计数器
 Limiter::counter(1000, 60)->allow('api:user:123');
 
-// 分布式：Redis / Memcached / PDO / APCu
-Limiter::redis(LimiterType::TOKEN_BUCKET, 100, 10.0, '127.0.0.1', 6379);
-Limiter::memcached(LimiterType::TOKEN_BUCKET, 100, 10.0, '127.0.0.1', 11211);
+// 分布式：Redis / Memcached / PDO / APCu（$prefix 参数可自定义键前缀，默认 'kode:limiting:'）
+Limiter::redis(LimiterType::TOKEN_BUCKET, 100, 10.0, '127.0.0.1', 6379, null, 0, RedisMode::STANDALONE, ['127.0.0.1:26379'], 'mymaster', 'myapp:rl:');
+Limiter::memcached(LimiterType::TOKEN_BUCKET, 100, 10.0, '127.0.0.1', 11211, 'myapp:rl:');
 Limiter::pdo(LimiterType::TOKEN_BUCKET, 100, 10.0, 'mysql:host=127.0.0.1;dbname=limiting', 'root', 'password');
 Limiter::apcu(LimiterType::TOKEN_BUCKET, 100, 10.0);
+
+// Redis Sentinel / Cluster 模式（prefix 统一透传到 RedisStore）
+Limiter::redis(LimiterType::TOKEN_BUCKET, 100, 10.0, mode: RedisMode::SENTINEL, sentinels: ['192.168.1.1:26379', '192.168.1.2:26379'], masterName: 'mymaster', prefix: 'myapp:rl:');
+Limiter::redis(LimiterType::TOKEN_BUCKET, 100, 10.0, mode: RedisMode::CLUSTER, clusterNodes: ['192.168.1.1:7000', '192.168.1.2:7000'], prefix: 'myapp:rl:');
 
 // 多规则组合：10 次/秒 且 100 次/分钟
 Limiter::composite([
@@ -185,6 +191,9 @@ use Kode\Limiting\LimiterManager;
 $manager = LimiterManager::fromConfig([
     'stores' => [
         'redis' => ['type' => 'redis', 'host' => '127.0.0.1'],
+        // Redis Sentinel / Cluster（storeFromArray 按 mode 自动路由）
+        'redis_ha' => ['type' => 'redis', 'mode' => 'sentinel', 'sentinels' => ['192.168.1.1:26379', '192.168.1.2:26379'], 'masterName' => 'mymaster', 'prefix' => 'myapp:rl:'],
+        'redis_cluster' => ['type' => 'redis', 'mode' => 'cluster', 'clusterNodes' => ['192.168.1.1:7000', '192.168.1.2:7000'], 'prefix' => 'myapp:rl:'],
     ],
     'limiters' => [
         'api'   => ['type' => 'token_bucket', 'capacity' => 100, 'refillRate' => 10, 'store' => 'redis'],
@@ -430,6 +439,16 @@ v2.1.0 为**向后兼容的增量版本**（纯新增能力，未改动既有 AP
 - **新增静态分析**：内置 PHPStan（level 6），`composer analyze` 检查。
 
 既有调用方式（v2.0）无需任何改动即可升级到 v2.1.0。
+
+## 从 v2.1 升级到 v2.2
+
+v2.2.0 为**向后兼容的增量版本**（新增可选参数，未改动既有 API 行为）：
+
+- **`Limiter::redis()` 新增 `$prefix` 参数**：此前 STANDALONE 硬编码 `'kode:limiting:'`、SENTINEL/CLUSTER 省略 prefix（落回默认值）；现三种模式统一透传到 `RedisStore`。
+- **`Limiter::memcached()` 新增 `$prefix` 参数**：此前签名无 prefix，`MemcachedStore::create()` 不传 prefix；现与 Redis/APCu 一致。
+- **`storeFromArray()` Redis 分支支持 sentinel/cluster**：此前只走 standalone；现按 `config['mode']` 路由三模式，各分支从 config 取 `sentinels`/`masterName`/`clusterNodes`/`prefix` 等键。
+
+既有调用方式（v2.1）无需任何改动即可升级到 v2.2.0——所有新参数均带默认值 `'kode:limiting:'`。
 
 ## 许可证
 

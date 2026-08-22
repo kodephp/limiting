@@ -216,12 +216,13 @@ class Limiter implements RateLimiterInterface
         RedisMode $mode = RedisMode::STANDALONE,
         array $sentinels = ['127.0.0.1:26379'],
         string $masterName = 'mymaster',
+        string $prefix = 'kode:limiting:',
         array $clusterNodes = ['127.0.0.1:7000']
     ): self {
         $store = match ($mode) {
-            RedisMode::STANDALONE => RedisStore::create($host, $port, 'kode:limiting:', $password, $database),
-            RedisMode::SENTINEL => RedisStore::createSentinel($sentinels, $masterName, $password, $database),
-            RedisMode::CLUSTER => RedisStore::createCluster($clusterNodes, $password),
+            RedisMode::STANDALONE => RedisStore::create($host, $port, $prefix, $password, $database),
+            RedisMode::SENTINEL => RedisStore::createSentinel($sentinels, $masterName, $password, $database, $prefix),
+            RedisMode::CLUSTER => RedisStore::createCluster($clusterNodes, $password, $prefix),
         };
 
         return new self(StoreType::REDIS, $limiterType, $store, new LimiterConfig($capacity, $refillRate));
@@ -235,12 +236,13 @@ class Limiter implements RateLimiterInterface
         int $capacity = 10,
         float $refillRate = 1.0,
         string $host = '127.0.0.1',
-        int $port = 11211
+        int $port = 11211,
+        string $prefix = 'kode:limiting:'
     ): self {
         return new self(
             StoreType::MEMCACHED,
             $limiterType,
-            MemcachedStore::create($host, $port),
+            MemcachedStore::create($host, $port, $prefix),
             new LimiterConfig($capacity, $refillRate)
         );
     }
@@ -542,13 +544,27 @@ class Limiter implements RateLimiterInterface
         return match ($type) {
             StoreType::MEMORY => new MemoryStore(),
             StoreType::APCU => ApcuStore::create((string) ($config['prefix'] ?? 'kode:limiting:')),
-            StoreType::REDIS => RedisStore::create(
-                (string) ($config['host'] ?? '127.0.0.1'),
-                (int) ($config['port'] ?? 6379),
-                (string) ($config['prefix'] ?? 'kode:limiting:'),
-                isset($config['password']) ? (string) $config['password'] : null,
-                (int) ($config['database'] ?? 0)
-            ),
+            StoreType::REDIS => match (RedisMode::tryFrom((string) ($config['mode'] ?? 'standalone')) ?? RedisMode::STANDALONE) {
+                RedisMode::STANDALONE => RedisStore::create(
+                    (string) ($config['host'] ?? '127.0.0.1'),
+                    (int) ($config['port'] ?? 6379),
+                    (string) ($config['prefix'] ?? 'kode:limiting:'),
+                    isset($config['password']) ? (string) $config['password'] : null,
+                    (int) ($config['database'] ?? 0)
+                ),
+                RedisMode::SENTINEL => RedisStore::createSentinel(
+                    (array) ($config['sentinels'] ?? ['127.0.0.1:26379']),
+                    (string) ($config['masterName'] ?? 'mymaster'),
+                    isset($config['password']) ? (string) $config['password'] : null,
+                    (int) ($config['database'] ?? 0),
+                    (string) ($config['prefix'] ?? 'kode:limiting:')
+                ),
+                RedisMode::CLUSTER => RedisStore::createCluster(
+                    (array) ($config['clusterNodes'] ?? ['127.0.0.1:7000']),
+                    isset($config['password']) ? (string) $config['password'] : null,
+                    (string) ($config['prefix'] ?? 'kode:limiting:')
+                ),
+            },
             StoreType::MEMCACHED => MemcachedStore::create(
                 (string) ($config['host'] ?? '127.0.0.1'),
                 (int) ($config['port'] ?? 11211),
