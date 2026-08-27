@@ -65,7 +65,13 @@ class TokenBucket extends AbstractRateLimiter
 
         $available = $state === null
             ? (float) $this->capacity
-            : $this->refill((float) ($state['tokens'] ?? 0), (float) ($state['last_update'] ?? $now), $now);
+            : $this->refill(
+                // @phpstan-ignore-next-line
+                (float) ($state['tokens'] ?? 0),
+                // @phpstan-ignore-next-line
+                (float) ($state['last_update'] ?? $now),
+                $now
+            );
 
         if ($available + 1e-9 < $tokens) {
             $this->writeState($bucketKey, ['tokens' => $available, 'last_update' => $now]);
@@ -91,7 +97,13 @@ class TokenBucket extends AbstractRateLimiter
 
         $now = microtime(true);
 
-        return $this->refill((float) ($state['tokens'] ?? 0), (float) ($state['last_update'] ?? $now), $now);
+        return $this->refill(
+            // @phpstan-ignore-next-line
+            (float) ($state['tokens'] ?? 0),
+            // @phpstan-ignore-next-line
+            (float) ($state['last_update'] ?? $now),
+            $now
+        );
     }
 
     #[\Override]

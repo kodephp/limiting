@@ -539,47 +539,101 @@ class Limiter implements RateLimiterInterface
      */
     private static function storeFromArray(array $config): StoreInterface
     {
-        $type = StoreType::tryFrom((string) ($config['type'] ?? 'memory')) ?? StoreType::MEMORY;
+        $type = StoreType::tryFrom(self::getConfigString($config, 'type', 'memory')) ?? StoreType::MEMORY;
 
         return match ($type) {
             StoreType::MEMORY => new MemoryStore(),
-            StoreType::APCU => ApcuStore::create((string) ($config['prefix'] ?? 'kode:limiting:')),
-            StoreType::REDIS => match (RedisMode::tryFrom((string) ($config['mode'] ?? 'standalone')) ?? RedisMode::STANDALONE) {
+            StoreType::APCU => ApcuStore::create(self::getConfigString($config, 'prefix', 'kode:limiting:')),
+            StoreType::REDIS => match (RedisMode::tryFrom(self::getConfigString($config, 'mode', 'standalone')) ?? RedisMode::STANDALONE) {
                 RedisMode::STANDALONE => RedisStore::create(
-                    (string) ($config['host'] ?? '127.0.0.1'),
-                    (int) ($config['port'] ?? 6379),
-                    (string) ($config['prefix'] ?? 'kode:limiting:'),
-                    isset($config['password']) ? (string) $config['password'] : null,
-                    (int) ($config['database'] ?? 0)
+                    self::getConfigString($config, 'host', '127.0.0.1'),
+                    self::getConfigInt($config, 'port', 6379),
+                    self::getConfigString($config, 'prefix', 'kode:limiting:'),
+                    isset($config['password']) ? self::getConfigString($config, 'password', '') : null,
+                    self::getConfigInt($config, 'database', 0)
                 ),
                 RedisMode::SENTINEL => RedisStore::createSentinel(
-                    (array) ($config['sentinels'] ?? ['127.0.0.1:26379']),
-                    (string) ($config['masterName'] ?? 'mymaster'),
-                    isset($config['password']) ? (string) $config['password'] : null,
-                    (int) ($config['database'] ?? 0),
-                    (string) ($config['prefix'] ?? 'kode:limiting:')
+                    /** @var array<int, string> */
+                    self::normalizeStringArrayFromConfig($config, 'sentinels', ['127.0.0.1:26379']),
+                    self::getConfigString($config, 'masterName', 'mymaster'),
+                    isset($config['password']) ? self::getConfigString($config, 'password', '') : null,
+                    self::getConfigInt($config, 'database', 0),
+                    self::getConfigString($config, 'prefix', 'kode:limiting:')
                 ),
                 RedisMode::CLUSTER => RedisStore::createCluster(
-                    (array) ($config['clusterNodes'] ?? ['127.0.0.1:7000']),
-                    isset($config['password']) ? (string) $config['password'] : null,
-                    (string) ($config['prefix'] ?? 'kode:limiting:')
+                    /** @var array<int, string> */
+                    self::normalizeStringArrayFromConfig($config, 'clusterNodes', ['127.0.0.1:7000']),
+                    isset($config['password']) ? self::getConfigString($config, 'password', '') : null,
+                    self::getConfigString($config, 'prefix', 'kode:limiting:')
                 ),
             },
             StoreType::MEMCACHED => MemcachedStore::create(
-                (string) ($config['host'] ?? '127.0.0.1'),
-                (int) ($config['port'] ?? 11211),
-                (string) ($config['prefix'] ?? 'kode:limiting:')
+                self::getConfigString($config, 'host', '127.0.0.1'),
+                self::getConfigInt($config, 'port', 11211),
+                self::getConfigString($config, 'prefix', 'kode:limiting:')
             ),
             StoreType::PDO => new PdoStore(
                 new \PDO(
-                    (string) ($config['dsn'] ?? 'sqlite::memory:'),
-                    isset($config['username']) ? (string) $config['username'] : null,
-                    isset($config['password']) ? (string) $config['password'] : null,
+                    self::getConfigString($config, 'dsn', 'sqlite::memory:'),
+                    isset($config['username']) ? self::getConfigString($config, 'username', '') : null,
+                    isset($config['password']) ? self::getConfigString($config, 'password', '') : null,
                     [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]
                 ),
-                (string) ($config['table'] ?? 'limiting')
+                /** @var string $table */
+                is_string($config['table'] ?? 'limiting') ? ($config['table'] ?? 'limiting') : 'limiting'
             ),
         };
+    }
+
+    /**
+     * @param mixed $value
+     * @param list<string> $default
+     * @return list<string>
+     */
+    private static function normalizeStringArray(mixed $value, array $default): array
+    {
+        $result = [];
+        foreach ((array) $value as $v) {
+            // @phpstan-ignore-next-line
+            $result[] = (string) $v;
+        }
+
+        return $result ?: $default;
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     * @param list<string> $default
+     * @return list<string>
+     */
+    private static function normalizeStringArrayFromConfig(array $config, string $key, array $default): array
+    {
+        /** @var mixed $value */
+        $value = $config[$key] ?? $default;
+
+        return self::normalizeStringArray($value, $default);
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     */
+    private static function getConfigString(array $config, string $key, string $default): string
+    {
+        $value = $config[$key] ?? $default;
+
+        // @phpstan-ignore-next-line
+        return (string) $value;
+    }
+
+    /**
+     * @param array<string, mixed> $config
+     */
+    private static function getConfigInt(array $config, string $key, int $default): int
+    {
+        $value = $config[$key] ?? $default;
+
+        // @phpstan-ignore-next-line
+        return (int) $value;
     }
 
     private static function storeFromType(StoreType $type): StoreInterface

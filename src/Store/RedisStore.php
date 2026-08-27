@@ -155,7 +155,12 @@ class RedisStore implements StoreInterface
     {
         $value = $this->redis->get($this->key($key));
 
-        return $value === false ? null : (string) $value;
+        if ($value === false || $value === null) {
+            return null;
+        }
+
+        /** @var string $value */
+        return is_string($value) ? $value : (string) $value;
     }
 
     #[\Override]

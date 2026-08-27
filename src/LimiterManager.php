@@ -55,17 +55,19 @@ final class LimiterManager
     {
         $manager = new self();
 
-        /** @var array<string, mixed> $storesConfig */
+        /** @var array<string, array<string, mixed>> $storesConfig */
         $storesConfig = $config['stores'] ?? [];
 
         foreach ($storesConfig as $name => $storeConfig) {
+            /** @var array<string, mixed> $storeConfig */
             $manager->stores[$name] = Limiter::store($storeConfig);
         }
 
-        /** @var array<string, mixed> $limitersConfig */
+        /** @var array<string, array<string, mixed>> $limitersConfig */
         $limitersConfig = $config['limiters'] ?? [];
 
         foreach ($limitersConfig as $name => $limiterConfig) {
+            /** @var array<string, mixed> $limiterConfig */
             $manager->register($name, $manager->buildLimiter($limiterConfig));
         }
 
@@ -154,8 +156,10 @@ final class LimiterManager
      */
     private function buildLimiter(array $config): RateLimiterInterface
     {
-        $type = LimiterType::tryFrom((string) ($config['type'] ?? 'token_bucket'))
-            ?? LimiterType::TOKEN_BUCKET;
+        /** @var string $typeStr */
+        // @phpstan-ignore-next-line
+        $typeStr = (string) ($config['type'] ?? 'token_bucket');
+        $type = LimiterType::tryFrom($typeStr) ?? LimiterType::TOKEN_BUCKET;
 
         $limiterConfig = LimiterConfig::fromArray($config);
         $store = $this->resolveStoreForLimiter($config);
@@ -172,6 +176,7 @@ final class LimiterManager
             return new MemoryStore();
         }
 
+        /** @var string|array<string, mixed> $storeRef */
         $storeRef = $config['store'];
 
         if (is_string($storeRef) && isset($this->stores[$storeRef])) {

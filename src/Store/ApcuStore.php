@@ -67,7 +67,12 @@ class ApcuStore implements StoreInterface
         $success = false;
         $value = apcu_fetch($this->key($key), $success);
 
-        return $success ? (string) $value : null;
+        if (!$success) {
+            return null;
+        }
+
+        /** @var string $value */
+        return is_string($value) ? $value : (string) $value;
     }
 
     #[\Override]
@@ -120,11 +125,18 @@ class ApcuStore implements StoreInterface
         $success = false;
         $expiresAt = apcu_fetch($this->expireKey($key), $success);
 
-        if (!$success || (int) $expiresAt <= 0) {
+        if (!$success) {
             return -1;
         }
 
-        $remaining = (int) $expiresAt - time();
+        /** @var int $expiresAt */
+        $expiresAtInt = is_int($expiresAt) ? $expiresAt : (int) $expiresAt;
+
+        if ($expiresAtInt <= 0) {
+            return -1;
+        }
+
+        $remaining = $expiresAtInt - time();
 
         return $remaining > 0 ? $remaining : -2;
     }

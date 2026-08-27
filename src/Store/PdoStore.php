@@ -36,7 +36,9 @@ class PdoStore implements StoreInterface
         }
 
         $this->pdo->setAttribute(\PDO::ATTR_ERRMODE, \PDO::ERRMODE_EXCEPTION);
-        $this->driver = (string) $this->pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
+        /** @var string $driverName */
+        $driverName = $this->pdo->getAttribute(\PDO::ATTR_DRIVER_NAME);
+        $this->driver = is_string($driverName) ? $driverName : (string) $driverName;
         $this->prefix = $prefix;
 
         $this->initTable();
@@ -151,20 +153,25 @@ class PdoStore implements StoreInterface
             "SELECT value, expires_at FROM {$this->table} WHERE key_name = :k"
         );
         $stmt->execute(['k' => $this->key($key)]);
+        /** @var array<string, mixed>|false $row */
         $row = $stmt->fetch(\PDO::FETCH_ASSOC);
 
         if ($row === false) {
             return null;
         }
 
-        $expiresAt = (int) $row['expires_at'];
+        /** @var int|string $expiresAtRaw */
+        $expiresAtRaw = $row['expires_at'] ?? 0;
+        $expiresAt = is_int($expiresAtRaw) ? $expiresAtRaw : (int) $expiresAtRaw;
 
         if ($expiresAt > 0 && $expiresAt <= time()) {
             $this->delete($key);
             return null;
         }
 
-        return (string) $row['value'];
+        /** @var string|int $valueRaw */
+        $valueRaw = $row['value'] ?? '';
+        return is_string($valueRaw) ? $valueRaw : (string) $valueRaw;
     }
 
     #[\Override]
@@ -203,17 +210,24 @@ class PdoStore implements StoreInterface
 
             $stmt = $this->pdo->prepare($sql);
             $stmt->execute(['k' => $this->key($key)]);
+            /** @var array<string, mixed>|false $row */
             $row = $stmt->fetch(\PDO::FETCH_ASSOC);
 
-            $expired = $row !== false
-                && (int) $row['expires_at'] > 0
-                && (int) $row['expires_at'] <= time();
+            /** @var int|string $expiresAtRaw */
+            $expiresAtRaw = $row !== false ? ($row['expires_at'] ?? 0) : 0;
+            $expiresAtInt = is_int($expiresAtRaw) ? $expiresAtRaw : (int) $expiresAtRaw;
 
-            $current = ($row === false || $expired) ? 0 : (int) $row['value'];
+            $expired = $row !== false
+                && $expiresAtInt > 0
+                && $expiresAtInt <= time();
+
+            /** @var int|string $valueRaw */
+            $valueRaw = $row !== false ? ($row['value'] ?? 0) : 0;
+            $current = ($row === false || $expired) ? 0 : (is_int($valueRaw) ? $valueRaw : (int) $valueRaw);
             $newValue = $current + $step;
 
             $expiresAt = match (true) {
-                $row !== false && !$expired => (int) $row['expires_at'],
+                $row !== false && !$expired => $expiresAtInt,
                 $ttl > 0 => time() + $ttl,
                 default => 0,
             };
@@ -250,13 +264,16 @@ class PdoStore implements StoreInterface
     {
         $stmt = $this->pdo->prepare("SELECT expires_at FROM {$this->table} WHERE key_name = :k");
         $stmt->execute(['k' => $this->key($key)]);
+        /** @var array<string, mixed>|false $row */
         $row = $stmt->fetch(\PDO::FETCH_ASSOC);
 
         if ($row === false) {
             return -2;
         }
 
-        $expiresAt = (int) $row['expires_at'];
+        /** @var int|string $expiresAtRaw */
+        $expiresAtRaw = $row['expires_at'] ?? 0;
+        $expiresAt = is_int($expiresAtRaw) ? $expiresAtRaw : (int) $expiresAtRaw;
 
         if ($expiresAt <= 0) {
             return -1;

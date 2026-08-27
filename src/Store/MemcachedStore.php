@@ -86,7 +86,12 @@ class MemcachedStore implements StoreInterface
             return null;
         }
 
-        return $value === false ? null : (string) $value;
+        if ($value === false || $value === null) {
+            return null;
+        }
+
+        /** @var string $value */
+        return is_string($value) ? $value : (string) $value;
     }
 
     #[\Override]
@@ -122,7 +127,8 @@ class MemcachedStore implements StoreInterface
             $this->memcached->set($this->expireKey($key), time() + $ttl, $ttl);
         }
 
-        return (int) $result;
+        /** @var int $result */
+        return is_int($result) ? $result : (int) $result;
     }
 
     #[\Override]
@@ -130,7 +136,12 @@ class MemcachedStore implements StoreInterface
     {
         $result = $this->memcached->decrement($this->key($key), $step, 0);
 
-        return $result === false ? 0 : (int) $result;
+        if ($result === false) {
+            return 0;
+        }
+
+        /** @var int $result */
+        return is_int($result) ? $result : (int) $result;
     }
 
     #[\Override]
@@ -142,11 +153,18 @@ class MemcachedStore implements StoreInterface
 
         $expiresAt = $this->memcached->get($this->expireKey($key));
 
-        if ($expiresAt === false || (int) $expiresAt <= 0) {
+        if ($expiresAt === false || $expiresAt === null) {
             return -1;
         }
 
-        $remaining = (int) $expiresAt - time();
+        /** @var int $expiresAt */
+        $expiresAtInt = is_int($expiresAt) ? $expiresAt : (int) $expiresAt;
+
+        if ($expiresAtInt <= 0) {
+            return -1;
+        }
+
+        $remaining = $expiresAtInt - time();
 
         return $remaining > 0 ? $remaining : -2;
     }

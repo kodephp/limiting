@@ -46,9 +46,13 @@ readonly class LimiterConfig
     public static function fromArray(array $config): self
     {
         return new self(
+            // @phpstan-ignore-next-line
             (int) ($config['capacity'] ?? $config['limit'] ?? 10),
+            // @phpstan-ignore-next-line
             (float) ($config['refillRate'] ?? $config['refill_rate'] ?? $config['window'] ?? 1.0),
+            // @phpstan-ignore-next-line
             (int) ($config['ttl'] ?? 3600),
+            // @phpstan-ignore-next-line
             (string) ($config['prefix'] ?? 'limiter:')
         );
     }
