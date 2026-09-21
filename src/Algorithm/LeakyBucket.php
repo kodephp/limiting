@@ -20,7 +20,7 @@ use Kode\Limiting\Store\StoreInterface;
  *  - 首次请求走内存态计算，省掉一次多余的 get；
  *  - getWaitTime() 按实际溢出量计算。
  */
-class LeakyBucket extends AbstractRateLimiter
+class LeakyBucket extends AbstractRateLimiter implements RefundableInterface
 {
     private readonly string $bucketPrefix;
 
@@ -104,6 +104,22 @@ class LeakyBucket extends AbstractRateLimiter
     {
         $this->assertKey($key);
         $this->store->delete($this->bucketPrefix . $key);
+    }
+
+    #[\Override]
+    public function refund(string $key, int $tokens = 1): void
+    {
+        $this->assertKey($key);
+
+        if ($tokens <= 0) {
+            return;
+        }
+
+        $now = microtime(true);
+        $bucketKey = $this->bucketPrefix . $key;
+        $water = max(0.0, $this->currentWater($bucketKey, $now) - $tokens);
+
+        $this->writeState($bucketKey, ['water' => $water, 'last_leak' => $now]);
     }
 
     public function getLeakRate(): float

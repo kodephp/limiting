@@ -20,7 +20,7 @@ use Kode\Limiting\Store\StoreInterface;
  *  当窗口小于 0.5 秒时 TTL 直接变成 0（永不过期），额度耗尽后再也无法恢复。
  *  现改为单键滑动日志，读写一次即可完成精确判定。
  */
-class SlidingWindow extends AbstractRateLimiter
+class SlidingWindow extends AbstractRateLimiter implements RefundableInterface
 {
     private readonly string $windowPrefix;
 
@@ -113,6 +113,29 @@ class SlidingWindow extends AbstractRateLimiter
     {
         $this->assertKey($key);
         $this->store->delete($this->windowPrefix . $key);
+    }
+
+    #[\Override]
+    public function refund(string $key, int $tokens = 1): void
+    {
+        $this->assertKey($key);
+
+        if ($tokens <= 0) {
+            return;
+        }
+
+        $now = microtime(true);
+        $windowKey = $this->windowPrefix . $key;
+        $entries = $this->activeEntries($windowKey, $now);
+
+        // 从最近的条目开始回退，至多退还 $tokens 个额度
+        $remaining = $tokens;
+        for ($i = count($entries) - 1; $i >= 0 && $remaining > 0; $i--) {
+            $remaining -= $entries[$i][1];
+            array_pop($entries);
+        }
+
+        $this->writeState($windowKey, ['entries' => $entries]);
     }
 
     public function getWindowSize(): float

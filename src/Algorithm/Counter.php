@@ -19,7 +19,7 @@ use Kode\Limiting\Store\StoreInterface;
  *  - 此前每次 set 都会重置 TTL，导致窗口被无限延长；现仅在窗口首次创建时设置 TTL；
  *  - getWaitTime() 返回当前窗口真实剩余秒数。
  */
-class Counter extends AbstractRateLimiter
+class Counter extends AbstractRateLimiter implements RefundableInterface
 {
     private readonly string $counterPrefix;
 
@@ -114,6 +114,16 @@ class Counter extends AbstractRateLimiter
     {
         $this->assertKey($key);
         $this->store->delete($this->getWindowKey($key, time()));
+    }
+
+    #[\Override]
+    public function refund(string $key, int $tokens = 1): void
+    {
+        $this->assertKey($key);
+
+        if ($tokens > 0) {
+            $this->store->decr($this->getWindowKey($key, time()), $tokens);
+        }
     }
 
     public function getLimit(): int

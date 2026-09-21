@@ -18,7 +18,7 @@ use Kode\Limiting\Store\StoreInterface;
  *  - 状态 JSON 损坏时不再触发 undefined index，按空桶重建；
  *  - getWaitTime() 按实际缺口计算，而非固定按 1 个令牌估算。
  */
-class TokenBucket extends AbstractRateLimiter
+class TokenBucket extends AbstractRateLimiter implements RefundableInterface
 {
     private readonly string $bucketPrefix;
 
@@ -131,6 +131,26 @@ class TokenBucket extends AbstractRateLimiter
     {
         $this->assertKey($key);
         $this->store->delete($this->bucketPrefix . $key);
+    }
+
+    #[\Override]
+    public function refund(string $key, int $tokens = 1): void
+    {
+        $this->assertKey($key);
+
+        if ($tokens <= 0) {
+            return;
+        }
+
+        $now = microtime(true);
+        $bucketKey = $this->bucketPrefix . $key;
+        $state = $this->readState($bucketKey);
+        $available = $state === null
+            ? 0.0
+            : $this->refill((float) ($state['tokens'] ?? 0), (float) ($state['last_update'] ?? $now), $now);
+
+        // @phpstan-ignore-next-line
+        $this->writeState($bucketKey, ['tokens' => min((float) $this->capacity, $available + $tokens), 'last_update' => $now]);
     }
 
     public function getRefillRate(): float

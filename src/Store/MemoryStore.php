@@ -12,6 +12,9 @@ namespace Kode\Limiting\Store;
  */
 class MemoryStore implements StoreInterface
 {
+    /** 常驻进程内按键数量阈值触发过期清理，防止无界增长 */
+    private const PURGE_THRESHOLD = 1024;
+
     /** @var array<string, string> */
     private array $data = [];
 
@@ -31,6 +34,8 @@ class MemoryStore implements StoreInterface
     #[\Override]
     public function set(string $key, string $value, int $ttl = 0): void
     {
+        $this->opportunisticPurge();
+
         $this->data[$key] = $value;
 
         if ($ttl > 0) {
@@ -49,6 +54,8 @@ class MemoryStore implements StoreInterface
     #[\Override]
     public function incr(string $key, int $step = 1, int $ttl = 0): int
     {
+        $this->opportunisticPurge();
+
         $exists = $this->has($key);
         $value = $exists ? (int) $this->data[$key] : 0;
         $newValue = $value + $step;
@@ -123,6 +130,16 @@ class MemoryStore implements StoreInterface
         }
 
         return $purged;
+    }
+
+    /**
+     * 键数量越过后机会性清扫过期项（限流键均带 TTL，可自然回收）
+     */
+    private function opportunisticPurge(): void
+    {
+        if (count($this->data) >= self::PURGE_THRESHOLD) {
+            $this->purgeExpired();
+        }
     }
 
     /**

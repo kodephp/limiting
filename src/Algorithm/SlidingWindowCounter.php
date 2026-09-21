@@ -20,7 +20,7 @@ use Kode\Limiting\Store\StoreInterface;
  * 且全部依赖存储层的原子 INCR，天然适合 Redis 分布式场景。
  * 代价是存在极小的统计误差（业界普遍认为 < 1%）。
  */
-class SlidingWindowCounter extends AbstractRateLimiter
+class SlidingWindowCounter extends AbstractRateLimiter implements RefundableInterface
 {
     private readonly string $counterPrefix;
 
@@ -61,13 +61,18 @@ class SlidingWindowCounter extends AbstractRateLimiter
 
         $now = microtime(true);
 
-        if ($this->estimate($key, $now) + $tokens > $this->capacity + 1e-9) {
-            return false;
+        if ($tokens <= 0) {
+            return $this->estimate($key, $now) < $this->capacity + 1e-9;
         }
 
-        if ($tokens > 0) {
-            $currentKey = $this->windowKey($key, $this->windowIndex($now));
-            $this->store->incr($currentKey, $tokens, $this->ttl);
+        // 先原子 incr 再按加权估算判定（旧实现 check-then-set 非原子，多 worker 并发可超发）
+        $currentKey = $this->windowKey($key, $this->windowIndex($now));
+        $this->store->incr($currentKey, $tokens, $this->ttl);
+
+        if ($this->estimate($key, $now) > $this->capacity + 1e-9) {
+            $this->store->decr($currentKey, $tokens);
+
+            return false;
         }
 
         return true;
@@ -102,6 +107,16 @@ class SlidingWindowCounter extends AbstractRateLimiter
         $index = $this->windowIndex(microtime(true));
         $this->store->delete($this->windowKey($key, $index));
         $this->store->delete($this->windowKey($key, $index - 1));
+    }
+
+    #[\Override]
+    public function refund(string $key, int $tokens = 1): void
+    {
+        $this->assertKey($key);
+
+        if ($tokens > 0) {
+            $this->store->decr($this->windowKey($key, $this->windowIndex(microtime(true))), $tokens);
+        }
     }
 
     public function getWindowSeconds(): int

@@ -17,7 +17,8 @@ use Kode\Limiting\Store\StoreInterface;
  *
  * 采用"先全量预检、再统一提交"的两阶段策略：
  * 任一规则预检不通过就整体拒绝，不会出现部分规则被扣减的情况；
- * 若提交阶段仍有规则失败（并发竞争），已扣减的规则会被回滚为可用状态。
+ * 若提交阶段仍有规则失败（并发竞争），已扣减的规则按本次增量 refund 扣回，
+ * 绝不 reset 整窗（否则会清空其它请求的合法计数）。
  *
  * @example
  * ```php
@@ -28,7 +29,7 @@ use Kode\Limiting\Store\StoreInterface;
  * $limiter->allow('api:user:1');
  * ```
  */
-class CompositeLimiter implements RateLimiterInterface
+class CompositeLimiter implements RateLimiterInterface, RefundableInterface
 {
     /** @var array<string, RateLimiterInterface> */
     private readonly array $limiters;
@@ -82,8 +83,13 @@ class CompositeLimiter implements RateLimiterInterface
                 continue;
             }
 
+            // 只扣回本次请求的增量；reset 会清空整个活窗口，可被攻击者利用来"归零"快规则
             foreach ($committed as $done) {
-                $done->reset($key);
+                if ($done instanceof RefundableInterface) {
+                    $done->refund($key, $tokens);
+                } else {
+                    $done->reset($key);
+                }
             }
 
             return false;
@@ -142,6 +148,19 @@ class CompositeLimiter implements RateLimiterInterface
     {
         foreach ($this->limiters as $limiter) {
             $limiter->reset($key);
+        }
+    }
+
+    /**
+     * 逐规则扣回本次增量，供外层组合回滚时使用（避免整窗清空）
+     */
+    #[\Override]
+    public function refund(string $key, int $tokens = 1): void
+    {
+        foreach ($this->limiters as $limiter) {
+            if ($limiter instanceof RefundableInterface) {
+                $limiter->refund($key, $tokens);
+            }
         }
     }
 
