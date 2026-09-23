@@ -2,6 +2,13 @@
 
 高性能 PHP 限流器，支持令牌桶、漏桶、滑动窗口、滑动窗口计数器、固定窗口计数器与多规则**组合限流**；内置内存 / APCu / Redis / Memcached / PDO 存储与分布式并发控制。PHP 8.3+。
 
+
+## 版本自述
+
+本包版本可由类常量核对：`Kode\Limiting\Limiter::VERSION`，或调用 `Limiter::version()`（当前 `2.4.0`）。
+
+`composer.json` 的 `version` 字段是 composer 侧的权威值，类常量是它的交叉核对副本——`tests/VersionGuardTest.php` 在两者不一致时直接失败，杜绝「tag 打了、常量忘改」的漂移。
+
 ## 功能特性
 
 - **五种限流算法**：令牌桶（支持突发）、漏桶（抑制突发）、滑动窗口（精确日志）、滑动窗口计数器（加权近似、内存恒定）、固定窗口计数器。
