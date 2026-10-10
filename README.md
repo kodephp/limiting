@@ -379,7 +379,7 @@ $config = LimiterConfig::fromArray(['capacity' => 100, 'window' => 60]);
 
 ## 单元测试
 
-测试覆盖全部核心功能，共 **125 个测试用例、540 项断言**（PHPUnit 10.5/11，PHP 8.3），全绿。
+测试覆盖全部核心功能，共 **131 个测试用例、559 项断言**（PHPUnit 10.5，PHP 8.4.26），全绿。
 
 ```bash
 # 运行全部
