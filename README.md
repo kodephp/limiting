@@ -26,7 +26,7 @@
 
 ## 系统要求
 
-- **PHP >= 8.3**
+- **PHP >= 8.4**
 - 可选扩展（按所用存储驱动）：`ext-redis`、`ext-apcu`、`ext-memcached`、`ext-pdo`
 
 ## 安装
