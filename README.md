@@ -1,6 +1,6 @@
 # kode/limiting
 
-高性能 PHP 限流器，支持令牌桶、漏桶、滑动窗口、滑动窗口计数器、固定窗口计数器与多规则**组合限流**；内置内存 / APCu / Redis / Memcached / PDO 存储与分布式并发控制。PHP 8.3+。
+高性能 PHP 限流器，支持令牌桶、漏桶、滑动窗口、滑动窗口计数器、固定窗口计数器与多规则**组合限流**；内置内存 / APCu / Redis / Memcached / PDO 存储与分布式并发控制。PHP 8.4+。
 
 
 ## 版本自述
@@ -22,7 +22,7 @@
 - **容灾降级**：`ResilientStore` 装饰任意存储，Redis / PDO 宕机时按策略兜底（默认 fail-open 放行并标记降级），业务不被限流器拖垮。
 - **事件回调**：`LimiterEventHandler` 在每次决策后（`onResult`）与异常时（`onError`）回调，方便接入日志 / 指标 / 告警。
 - **质量门禁**：内置 PHPStan（level 6）静态分析，`composer analyze` 一键检查。
-- **PHP 8.3+**：使用 `#[\Override]`、typed class constants、`json_validate()` 等新特性。
+- **PHP 8.4+**：使用 `#[\Override]`、typed class constants、`json_validate()` 等新特性。
 
 ## 系统要求
 

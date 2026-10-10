@@ -58,7 +58,7 @@ use Kode\Limiting\Store\StoreInterface;
 class Limiter implements RateLimiterInterface
 {
     /** @var string 版本号（与 composer.json 的 version 保持同步，漏改由 VersionGuardTest 拦下） */
-    public const string VERSION = '2.4.0';
+    public const string VERSION = '3.0.0';
 
     /**
      * 获取本包版本号
