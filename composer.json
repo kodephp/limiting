@@ -2,7 +2,7 @@
     "name": "kode/limiting",
     "description": "PHP 8.4+ 限流器，支持令牌桶、漏桶、滑动窗口、滑动窗口计数器、固定窗口计数器与多规则组合限流，内置内存/APCu/Redis/Memcached/PDO 存储与分布式并发控制",
     "type": "library",
-    "version": "3.0.1",
+    "version": "3.0.2",
     "license": "Apache-2.0",
     "keywords": [
         "limiting",

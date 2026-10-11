@@ -91,6 +91,7 @@ abstract class AbstractRateLimiter implements RateLimiterInterface
         return $this->prefix;
     }
 
+    #[\Override]
     public function getStore(): StoreInterface
     {
         return $this->store;

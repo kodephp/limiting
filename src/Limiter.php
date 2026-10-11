@@ -58,7 +58,7 @@ use Kode\Limiting\Store\StoreInterface;
 class Limiter implements RateLimiterInterface
 {
     /** @var string 版本号（与 composer.json 的 version 保持同步，漏改由 VersionGuardTest 拦下） */
-    public const string VERSION = '3.0.1';
+    public const string VERSION = '3.0.2';
 
     /**
      * 获取本包版本号
@@ -468,6 +468,7 @@ class Limiter implements RateLimiterInterface
         return $this->config->capacity;
     }
 
+    #[\Override]
     public function getStore(): StoreInterface
     {
         return $this->store;
