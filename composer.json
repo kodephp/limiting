@@ -2,7 +2,7 @@
     "name": "kode/limiting",
     "description": "PHP 8.4+ 限流器，支持令牌桶、漏桶、滑动窗口、滑动窗口计数器、固定窗口计数器与多规则组合限流，内置内存/APCu/Redis/Memcached/PDO 存储与分布式并发控制",
     "type": "library",
-    "version": "3.0.3",
+    "version": "3.0.4",
     "license": "Apache-2.0",
     "keywords": [
         "limiting",
@@ -22,6 +22,10 @@
             "email": "382601296@qq.com"
         }
     ],
+    "support": {
+        "issues": "https://github.com/kodephp/limiting/issues",
+        "source": "https://github.com/kodephp/limiting"
+    },
     "autoload": {
         "psr-4": {
             "Kode\\Limiting\\": "src/"
