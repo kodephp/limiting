@@ -32,7 +32,7 @@ abstract class AbstractRateLimiter implements RateLimiterInterface
     }
 
     #[\Override]
-    public function check(string $key, int $tokens = 1): LimiterResult
+    public function check(string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult
     {
         $this->assertKey($key);
         $this->assertTokens($tokens);
@@ -47,7 +47,7 @@ abstract class AbstractRateLimiter implements RateLimiterInterface
     }
 
     #[\Override]
-    public function consume(string $key, int $tokens = 1): LimiterResult
+    public function consume(string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult
     {
         $this->assertKey($key);
         $this->assertTokens($tokens);
@@ -64,7 +64,7 @@ abstract class AbstractRateLimiter implements RateLimiterInterface
      *
      * @throws RateLimitExceededException
      */
-    public function consumeOrFail(string $key, int $tokens = 1): LimiterResult
+    public function consumeOrFail(string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult
     {
         $result = $this->consume($key, $tokens);
 
@@ -104,7 +104,7 @@ abstract class AbstractRateLimiter implements RateLimiterInterface
         }
     }
 
-    protected function assertTokens(int $tokens): void
+    protected function assertTokens(#[\SensitiveParameter] int $tokens): void
     {
         if ($tokens < 0) {
             throw InvalidConfigurationException::negativeTokens($tokens);

@@ -58,7 +58,7 @@ use Kode\Limiting\Store\StoreInterface;
 class Limiter implements RateLimiterInterface
 {
     /** @var string 版本号（与 composer.json 的 version 保持同步，漏改由 VersionGuardTest 拦下） */
-    public const string VERSION = '3.0.2';
+    public const string VERSION = '3.0.3';
 
     /**
      * 获取本包版本号
@@ -222,7 +222,7 @@ class Limiter implements RateLimiterInterface
         float $refillRate = 1.0,
         string $host = '127.0.0.1',
         int $port = 6379,
-        ?string $password = null,
+        #[\SensitiveParameter] ?string $password = null,
         int $database = 0,
         RedisMode $mode = RedisMode::STANDALONE,
         array $sentinels = ['127.0.0.1:26379'],
@@ -267,7 +267,7 @@ class Limiter implements RateLimiterInterface
         float $refillRate = 1.0,
         string $dsn = 'sqlite::memory:',
         ?string $username = null,
-        ?string $password = null,
+        #[\SensitiveParameter] ?string $password = null,
         string $table = 'limiting'
     ): self {
         $pdo = new \PDO($dsn, $username, $password, [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
@@ -393,13 +393,13 @@ class Limiter implements RateLimiterInterface
     }
 
     #[\Override]
-    public function allow(string $key, int $tokens = 1): bool
+    public function allow(string $key, #[\SensitiveParameter] int $tokens = 1): bool
     {
         return $this->build()->allow($key, $tokens);
     }
 
     #[\Override]
-    public function check(string $key, int $tokens = 1): LimiterResult
+    public function check(string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult
     {
         try {
             $result = $this->attachDegradation($this->build()->check($key, $tokens));
@@ -414,7 +414,7 @@ class Limiter implements RateLimiterInterface
     }
 
     #[\Override]
-    public function consume(string $key, int $tokens = 1): LimiterResult
+    public function consume(string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult
     {
         try {
             $result = $this->attachDegradation($this->build()->consume($key, $tokens));
@@ -433,7 +433,7 @@ class Limiter implements RateLimiterInterface
      *
      * @throws RateLimitExceededException
      */
-    public function consumeOrFail(string $key, int $tokens = 1): LimiterResult
+    public function consumeOrFail(string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult
     {
         $result = $this->consume($key, $tokens);
 

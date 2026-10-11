@@ -65,7 +65,7 @@ class CompositeLimiter implements RateLimiterInterface, RefundableInterface
     }
 
     #[\Override]
-    public function allow(string $key, int $tokens = 1): bool
+    public function allow(string $key, #[\SensitiveParameter] int $tokens = 1): bool
     {
         // 阶段一：全部预检
         foreach ($this->limiters as $limiter) {
@@ -99,7 +99,7 @@ class CompositeLimiter implements RateLimiterInterface, RefundableInterface
     }
 
     #[\Override]
-    public function check(string $key, int $tokens = 1): LimiterResult
+    public function check(string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult
     {
         $worst = null;
 
@@ -118,7 +118,7 @@ class CompositeLimiter implements RateLimiterInterface, RefundableInterface
     }
 
     #[\Override]
-    public function consume(string $key, int $tokens = 1): LimiterResult
+    public function consume(string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult
     {
         if ($this->allow($key, $tokens)) {
             return LimiterResult::allowed($this->getRemaining($key), $this->getCapacity(), $this->getWaitTime($key));
@@ -155,7 +155,7 @@ class CompositeLimiter implements RateLimiterInterface, RefundableInterface
      * 逐规则扣回本次增量，供外层组合回滚时使用（避免整窗清空）
      */
     #[\Override]
-    public function refund(string $key, int $tokens = 1): void
+    public function refund(string $key, #[\SensitiveParameter] int $tokens = 1): void
     {
         foreach ($this->limiters as $limiter) {
             if ($limiter instanceof RefundableInterface) {
@@ -185,7 +185,7 @@ class CompositeLimiter implements RateLimiterInterface, RefundableInterface
     /**
      * 定位最先拒绝请求的规则名，便于日志与排障
      */
-    public function firstDeniedRule(string $key, int $tokens = 1): ?string
+    public function firstDeniedRule(string $key, #[\SensitiveParameter] int $tokens = 1): ?string
     {
         foreach ($this->limiters as $name => $limiter) {
             if ($limiter->check($key, $tokens)->isDenied()) {
@@ -209,7 +209,7 @@ class CompositeLimiter implements RateLimiterInterface, RefundableInterface
      *
      * @return array<string, LimiterResult>
      */
-    public function inspect(string $key, int $tokens = 1): array
+    public function inspect(string $key, #[\SensitiveParameter] int $tokens = 1): array
     {
         $results = [];
 

@@ -89,7 +89,7 @@ LUA;
         int $port = 6379,
         int $capacity = 100,
         float $refillRate = 10.0,
-        ?string $password = null,
+        #[\SensitiveParameter] ?string $password = null,
         int $database = 0,
         string $prefix = 'limiter:'
     ): self {
@@ -110,7 +110,7 @@ LUA;
         string $masterName,
         int $capacity = 100,
         float $refillRate = 10.0,
-        ?string $password = null,
+        #[\SensitiveParameter] ?string $password = null,
         int $database = 0,
         string $prefix = 'limiter:'
     ): self {
@@ -130,7 +130,7 @@ LUA;
         array $nodes,
         int $capacity = 100,
         float $refillRate = 10.0,
-        ?string $password = null,
+        #[\SensitiveParameter] ?string $password = null,
         string $prefix = 'limiter:'
     ): self {
         return new self(
@@ -143,7 +143,7 @@ LUA;
     }
 
     #[\Override]
-    public function allow(string $key, int $tokens = 1): bool
+    public function allow(string $key, #[\SensitiveParameter] int $tokens = 1): bool
     {
         $this->assertKey($key);
         $this->assertTokens($tokens);
@@ -161,7 +161,7 @@ LUA;
         return $result === 1 || $result === true;
     }
 
-    public function tryAcquire(string $key, int $tokens = 1): bool
+    public function tryAcquire(string $key, #[\SensitiveParameter] int $tokens = 1): bool
     {
         return $this->allow($key, $tokens);
     }
@@ -211,7 +211,7 @@ LUA;
      * @param list<string> $keys
      * @return array{0: list<string>, 1: list<string>} [放行的 key, 被限流的 key]
      */
-    public function allowBatch(array $keys, int $tokens = 1): array
+    public function allowBatch(array $keys, #[\SensitiveParameter] int $tokens = 1): array
     {
         $success = [];
         $failed = [];

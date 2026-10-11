@@ -36,7 +36,7 @@ final readonly class RateLimit
         public float $rate = 1.0,
         public ?string $key = null,
         public LimiterType $type = LimiterType::TOKEN_BUCKET,
-        public int $tokens = 1,
+        #[\SensitiveParameter] public int $tokens = 1,
         public string $group = 'default'
     ) {
         if ($capacity <= 0) {

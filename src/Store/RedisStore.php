@@ -52,7 +52,7 @@ class RedisStore implements StoreInterface
         string $host = '127.0.0.1',
         int $port = 6379,
         string $prefix = 'kode:limiting:',
-        ?string $password = null,
+        #[\SensitiveParameter] ?string $password = null,
         int $database = 0,
         float $timeout = 1.0
     ): self {
@@ -83,7 +83,7 @@ class RedisStore implements StoreInterface
     public static function createSentinel(
         array $sentinels,
         string $masterName,
-        ?string $password = null,
+        #[\SensitiveParameter] ?string $password = null,
         int $database = 0,
         string $prefix = 'kode:limiting:',
         float $timeout = 1.0
@@ -130,7 +130,7 @@ class RedisStore implements StoreInterface
      */
     public static function createCluster(
         array $nodes,
-        ?string $password = null,
+        #[\SensitiveParameter] ?string $password = null,
         string $prefix = 'kode:limiting:',
         float $timeout = 1.0
     ): self {

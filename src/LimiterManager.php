@@ -128,7 +128,7 @@ final class LimiterManager
     /**
      * 便捷放行判定
      */
-    public function allow(string $name, string $key, int $tokens = 1): bool
+    public function allow(string $name, string $key, #[\SensitiveParameter] int $tokens = 1): bool
     {
         return $this->limiter($name)->allow($key, $tokens);
     }
@@ -136,7 +136,7 @@ final class LimiterManager
     /**
      * 便捷预检（不消耗额度）
      */
-    public function check(string $name, string $key, int $tokens = 1): LimiterResult
+    public function check(string $name, string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult
     {
         return $this->limiter($name)->check($key, $tokens);
     }
@@ -144,7 +144,7 @@ final class LimiterManager
     /**
      * 便捷消耗额度
      */
-    public function consume(string $name, string $key, int $tokens = 1): LimiterResult
+    public function consume(string $name, string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult
     {
         return $this->limiter($name)->consume($key, $tokens);
     }

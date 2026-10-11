@@ -19,17 +19,17 @@ interface LimiterMiddlewareInterface
      *
      * @return bool true 表示被限流，false 表示允许通过
      */
-    public function isLimited(string $key, int $tokens = 1): bool;
+    public function isLimited(string $key, #[\SensitiveParameter] int $tokens = 1): bool;
 
     /**
      * 消耗额度并返回完整结果
      */
-    public function consume(string $key, int $tokens = 1): LimiterResult;
+    public function consume(string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult;
 
     /**
      * 只读探测，不消耗额度
      */
-    public function peek(string $key, int $tokens = 1): LimiterResult;
+    public function peek(string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult;
 
     /**
      * 获取限流详细信息（只读，不消耗额度）

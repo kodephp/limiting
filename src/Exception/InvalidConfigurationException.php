@@ -21,7 +21,7 @@ final class InvalidConfigurationException extends \InvalidArgumentException impl
         return new self('限流键（key）不能为空字符串');
     }
 
-    public static function negativeTokens(int $tokens): self
+    public static function negativeTokens(#[\SensitiveParameter] int $tokens): self
     {
         return new self(sprintf('请求令牌数不能为负数，当前值：%d', $tokens));
     }

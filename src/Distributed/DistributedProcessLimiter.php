@@ -28,7 +28,7 @@ class DistributedProcessLimiter extends AbstractDistributedSemaphore
         string $host = '127.0.0.1',
         int $port = 6379,
         int $maxProcesses = 10,
-        ?string $password = null,
+        #[\SensitiveParameter] ?string $password = null,
         int $database = 0,
         string $prefix = 'process:limiter:'
     ): self {
@@ -46,7 +46,7 @@ class DistributedProcessLimiter extends AbstractDistributedSemaphore
         string $host = '127.0.0.1',
         int $port = 6379,
         int $maxProcesses = 10,
-        ?string $password = null,
+        #[\SensitiveParameter] ?string $password = null,
         int $database = 0
     ): self {
         $cacheKey = "{$host}:{$port}:{$maxProcesses}:{$database}";

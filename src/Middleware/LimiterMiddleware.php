@@ -41,13 +41,13 @@ class LimiterMiddleware implements LimiterMiddlewareInterface
     }
 
     #[\Override]
-    public function isLimited(string $key, int $tokens = 1): bool
+    public function isLimited(string $key, #[\SensitiveParameter] int $tokens = 1): bool
     {
         return !$this->limiter->allow($key, $tokens);
     }
 
     #[\Override]
-    public function consume(string $key, int $tokens = 1): LimiterResult
+    public function consume(string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult
     {
         try {
             $result = $this->enrich($this->limiter->consume($key, $tokens));
@@ -62,7 +62,7 @@ class LimiterMiddleware implements LimiterMiddlewareInterface
     }
 
     #[\Override]
-    public function peek(string $key, int $tokens = 1): LimiterResult
+    public function peek(string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult
     {
         return $this->enrich($this->limiter->check($key, $tokens));
     }
@@ -76,7 +76,7 @@ class LimiterMiddleware implements LimiterMiddlewareInterface
      * @return T
      * @throws RateLimitExceededException 当被限流且未提供 $onLimited 时
      */
-    public function handle(string $key, callable $next, ?callable $onLimited = null, int $tokens = 1): mixed
+    public function handle(string $key, callable $next, ?callable $onLimited = null, #[\SensitiveParameter] int $tokens = 1): mixed
     {
         $result = $this->consume($key, $tokens);
 

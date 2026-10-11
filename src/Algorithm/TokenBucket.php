@@ -50,7 +50,7 @@ class TokenBucket extends AbstractRateLimiter implements RefundableInterface
     }
 
     #[\Override]
-    public function allow(string $key, int $tokens = 1): bool
+    public function allow(string $key, #[\SensitiveParameter] int $tokens = 1): bool
     {
         $this->assertKey($key);
         $this->assertTokens($tokens);
@@ -115,7 +115,7 @@ class TokenBucket extends AbstractRateLimiter implements RefundableInterface
     /**
      * 获取攒够指定令牌数所需的等待秒数
      */
-    public function getWaitTimeFor(string $key, int $tokens): float
+    public function getWaitTimeFor(string $key, #[\SensitiveParameter] int $tokens): float
     {
         $remaining = $this->getRemaining($key);
 
@@ -134,7 +134,7 @@ class TokenBucket extends AbstractRateLimiter implements RefundableInterface
     }
 
     #[\Override]
-    public function refund(string $key, int $tokens = 1): void
+    public function refund(string $key, #[\SensitiveParameter] int $tokens = 1): void
     {
         $this->assertKey($key);
 
@@ -161,7 +161,7 @@ class TokenBucket extends AbstractRateLimiter implements RefundableInterface
     /**
      * 按流逝时间补充令牌，上限为桶容量
      */
-    private function refill(float $tokens, float $lastUpdate, float $now): float
+    private function refill(#[\SensitiveParameter] float $tokens, float $lastUpdate, float $now): float
     {
         $elapsed = max(0.0, $now - $lastUpdate);
 

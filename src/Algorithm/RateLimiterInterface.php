@@ -18,17 +18,17 @@ interface RateLimiterInterface
     /**
      * 尝试消耗额度，返回是否放行
      */
-    public function allow(string $key, int $tokens = 1): bool;
+    public function allow(string $key, #[\SensitiveParameter] int $tokens = 1): bool;
 
     /**
      * 只读探测，不消耗额度
      */
-    public function check(string $key, int $tokens = 1): LimiterResult;
+    public function check(string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult;
 
     /**
      * 消耗额度并返回完整结果（含剩余额度、重试等待时间、响应头信息）
      */
-    public function consume(string $key, int $tokens = 1): LimiterResult;
+    public function consume(string $key, #[\SensitiveParameter] int $tokens = 1): LimiterResult;
 
     /**
      * 获取剩余可用额度

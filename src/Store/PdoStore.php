@@ -49,7 +49,7 @@ class PdoStore implements StoreInterface
         int $port = 3306,
         string $database = 'limiting',
         string $username = 'root',
-        string $password = '',
+        #[\SensitiveParameter] string $password = '',
         string $table = 'limiting'
     ): self {
         self::assertDriver('pdo_mysql', 'PDO MySQL', 'https://www.php.net/manual/zh/ref.pdo-mysql.php');
@@ -71,7 +71,7 @@ class PdoStore implements StoreInterface
         int $port = 5432,
         string $database = 'limiting',
         string $username = 'postgres',
-        string $password = '',
+        #[\SensitiveParameter] string $password = '',
         string $table = 'limiting'
     ): self {
         self::assertDriver('pdo_pgsql', 'PDO PostgreSQL', 'https://www.php.net/manual/zh/ref.pdo-pgsql.php');
@@ -88,7 +88,7 @@ class PdoStore implements StoreInterface
         }
     }
 
-    private static function connect(string $dsn, ?string $username, ?string $password): \PDO
+    private static function connect(string $dsn, ?string $username, #[\SensitiveParameter] ?string $password): \PDO
     {
         try {
             return new \PDO($dsn, $username, $password, [

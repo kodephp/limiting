@@ -50,7 +50,7 @@ class SlidingWindowCounter extends AbstractRateLimiter implements RefundableInte
     }
 
     #[\Override]
-    public function allow(string $key, int $tokens = 1): bool
+    public function allow(string $key, #[\SensitiveParameter] int $tokens = 1): bool
     {
         $this->assertKey($key);
         $this->assertTokens($tokens);
@@ -110,7 +110,7 @@ class SlidingWindowCounter extends AbstractRateLimiter implements RefundableInte
     }
 
     #[\Override]
-    public function refund(string $key, int $tokens = 1): void
+    public function refund(string $key, #[\SensitiveParameter] int $tokens = 1): void
     {
         $this->assertKey($key);
 

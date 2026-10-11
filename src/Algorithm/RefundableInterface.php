@@ -19,5 +19,5 @@ interface RefundableInterface
     /**
      * 归还此前已扣减的额度（用于组合限流回滚），不会低于 0
      */
-    public function refund(string $key, int $tokens = 1): void;
+    public function refund(string $key, #[\SensitiveParameter] int $tokens = 1): void;
 }
