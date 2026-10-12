@@ -187,13 +187,7 @@ class CompositeLimiter implements RateLimiterInterface, RefundableInterface
      */
     public function firstDeniedRule(string $key, #[\SensitiveParameter] int $tokens = 1): ?string
     {
-        foreach ($this->limiters as $name => $limiter) {
-            if ($limiter->check($key, $tokens)->isDenied()) {
-                return $name;
-            }
-        }
-
-        return null;
+        return array_find_key($this->limiters, fn($limiter, $name) => $limiter->check($key, $tokens)->isDenied());
     }
 
     /**
