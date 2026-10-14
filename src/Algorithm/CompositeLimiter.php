@@ -6,7 +6,6 @@ namespace Kode\Limiting\Algorithm;
 
 use Kode\Limiting\DTO\LimiterResult;
 use Kode\Limiting\Exception\InvalidConfigurationException;
-use Kode\Limiting\Store\MemoryStore;
 use Kode\Limiting\Store\StoreInterface;
 
 /**
@@ -68,10 +67,8 @@ class CompositeLimiter implements RateLimiterInterface, RefundableInterface
     public function allow(string $key, #[\SensitiveParameter] int $tokens = 1): bool
     {
         // 阶段一：全部预检
-        foreach ($this->limiters as $limiter) {
-            if ($limiter->check($key, $tokens)->isDenied()) {
-                return false;
-            }
+        if (array_any($this->limiters, fn(RateLimiterInterface $limiter) => $limiter->check($key, $tokens)->isDenied())) {
+            return false;
         }
 
         // 阶段二：统一提交，失败则回滚已提交的规则
@@ -175,11 +172,7 @@ class CompositeLimiter implements RateLimiterInterface, RefundableInterface
     #[\Override]
     public function getStore(): StoreInterface
     {
-        foreach ($this->limiters as $limiter) {
-            return $limiter->getStore();
-        }
-
-        return new MemoryStore();
+        return reset($this->limiters)->getStore();
     }
 
     /**
