@@ -21,7 +21,7 @@ readonly class LimiterConfig
      */
     public function __construct(
         public int $capacity,
-        public float $refillRate,
+        public private(set) float $refillRate,
         public int $ttl = 3600,
         public string $prefix = 'limiter:'
     ) {

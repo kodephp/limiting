@@ -33,7 +33,7 @@ final readonly class RateLimit
      */
     public function __construct(
         public int $capacity = 60,
-        public float $rate = 1.0,
+        public private(set) float $rate = 1.0,
         public ?string $key = null,
         public LimiterType $type = LimiterType::TOKEN_BUCKET,
         #[\SensitiveParameter] public int $tokens = 1,

@@ -31,7 +31,7 @@ readonly class LimiterResult implements \JsonSerializable
         public float $remaining = 0.0,
         public float $retryAfter = 0.0,
         public int $limit = 0,
-        public float $resetAfter = 0.0,
+        public private(set) float $resetAfter = 0.0,
         ?int $timestamp = null,
         public bool $degraded = false,
         public ?string $degradedReason = null

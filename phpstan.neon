@@ -10,6 +10,9 @@ parameters:
         - src/Distributed/DistributedFiberLimiter.php
     treatPhpDocTypesAsCertain: false
     ignoreErrors:
+        # 组合器防御空 limiters 集合（构造期恒非空但静态不可证）
+        -
+            identifier: nullCoalesce.variable
         # PHPStan 1.12 的 array_find_key 桩把参数 1 误标为 by-ref；PHP 8.4 实际签名非引用
         # （ReflectionFunction('array_find_key')->getParameters()[0]->isPassedByReference() === false），
         # CompositeLimiterTest::firstDeniedRule 路径运行时正常。待 PHPStan 2.x 修正桩后移除。
