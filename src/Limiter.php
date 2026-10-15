@@ -58,7 +58,7 @@ use Kode\Limiting\Store\StoreInterface;
 class Limiter implements RateLimiterInterface
 {
     /** @var string 版本号（与 composer.json 的 version 保持同步，漏改由 VersionGuardTest 拦下） */
-    public const string VERSION = '3.0.6';
+    public const string VERSION = '3.0.7';
 
     /**
      * 获取本包版本号
@@ -606,7 +606,6 @@ class Limiter implements RateLimiterInterface
     {
         $result = [];
         foreach ((array) $value as $v) {
-            // @phpstan-ignore-next-line
             $result[] = (string) $v;
         }
 
@@ -633,7 +632,6 @@ class Limiter implements RateLimiterInterface
     {
         $value = $config[$key] ?? $default;
 
-        // @phpstan-ignore-next-line
         return (string) $value;
     }
 
@@ -644,7 +642,6 @@ class Limiter implements RateLimiterInterface
     {
         $value = $config[$key] ?? $default;
 
-        // @phpstan-ignore-next-line
         return (int) $value;
     }
 

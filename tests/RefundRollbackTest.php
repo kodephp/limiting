@@ -197,8 +197,7 @@ class RefundRollbackTest extends TestCase
      */
     private function readExpires(\ReflectionProperty $prop): array
     {
-        $prop->setAccessible(true);
-
+        // PHP 8.1+ 反射属性默认可访问，setAccessible 自 8.5 起已弃用（且一直无效果）
         /** @var array<string, float> $value */
         $value = $prop->getValue($this->store);
 

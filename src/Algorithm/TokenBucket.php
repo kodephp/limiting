@@ -66,9 +66,7 @@ class TokenBucket extends AbstractRateLimiter implements RefundableInterface
         $available = $state === null
             ? (float) $this->capacity
             : $this->refill(
-                // @phpstan-ignore-next-line
                 (float) ($state['tokens'] ?? 0),
-                // @phpstan-ignore-next-line
                 (float) ($state['last_update'] ?? $now),
                 $now
             );
@@ -98,9 +96,7 @@ class TokenBucket extends AbstractRateLimiter implements RefundableInterface
         $now = microtime(true);
 
         return $this->refill(
-            // @phpstan-ignore-next-line
             (float) ($state['tokens'] ?? 0),
-            // @phpstan-ignore-next-line
             (float) ($state['last_update'] ?? $now),
             $now
         );
@@ -149,7 +145,6 @@ class TokenBucket extends AbstractRateLimiter implements RefundableInterface
             ? 0.0
             : $this->refill((float) ($state['tokens'] ?? 0), (float) ($state['last_update'] ?? $now), $now);
 
-        // @phpstan-ignore-next-line
         $this->writeState($bucketKey, ['tokens' => min((float) $this->capacity, $available + $tokens), 'last_update' => $now]);
     }
 

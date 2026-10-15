@@ -138,9 +138,7 @@ class LeakyBucket extends AbstractRateLimiter implements RefundableInterface
             return 0.0;
         }
 
-        // @phpstan-ignore-next-line
         $water = (float) ($state['water'] ?? 0.0);
-        // @phpstan-ignore-next-line
         $lastLeak = (float) ($state['last_leak'] ?? $now);
         $leaked = max(0.0, $now - $lastLeak) * $this->leakRate;
 

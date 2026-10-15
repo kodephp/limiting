@@ -157,7 +157,6 @@ final class LimiterManager
     private function buildLimiter(array $config): RateLimiterInterface
     {
         /** @var string $typeStr */
-        // @phpstan-ignore-next-line
         $typeStr = (string) ($config['type'] ?? 'token_bucket');
         $type = LimiterType::tryFrom($typeStr) ?? LimiterType::TOKEN_BUCKET;
 

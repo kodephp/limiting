@@ -9,3 +9,11 @@ parameters:
         - src/Distributed/DistributedProcessLimiter.php
         - src/Distributed/DistributedFiberLimiter.php
     treatPhpDocTypesAsCertain: false
+    ignoreErrors:
+        # PHPStan 1.12 的 array_find_key 桩把参数 1 误标为 by-ref；PHP 8.4 实际签名非引用
+        # （ReflectionFunction('array_find_key')->getParameters()[0]->isPassedByReference() === false），
+        # CompositeLimiterTest::firstDeniedRule 路径运行时正常。待 PHPStan 2.x 修正桩后移除。
+        -
+            message: '~Parameter \#1 \$array is passed by reference so it does not accept readonly property~'
+            identifier: argument.byRef
+            path: src/Algorithm/CompositeLimiter.php
