@@ -5,7 +5,7 @@
 
 ## 版本自述
 
-本包版本可由类常量核对：`Kode\Limiting\Limiter::VERSION`，或调用 `Limiter::version()`（当前 `2.4.0`）。
+本包版本可由类常量核对：`Kode\Limiting\Limiter::VERSION`，或调用 `Limiter::version()`（当前 `3.1.0`）。
 
 `composer.json` 的 `version` 字段是 composer 侧的权威值，类常量是它的交叉核对副本——`tests/VersionGuardTest.php` 在两者不一致时直接失败，杜绝「tag 打了、常量忘改」的漂移。
 
